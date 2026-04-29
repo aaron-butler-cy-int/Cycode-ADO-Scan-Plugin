@@ -1,6 +1,6 @@
 {
     "name": "cycode-ado-plugin",
-    "version": "0.2.7",
+    "version": "0.2.9",
     "scripts": {
         "build:tasks": "npx ncc build cycodescan/index.ts -o cycodescan/ncc_out && npx ncc build cycodeapigate/index.ts -o cycodeapigate/ncc_out",
         "build:ui": "webpack",
