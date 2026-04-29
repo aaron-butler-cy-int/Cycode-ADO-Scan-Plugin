@@ -1,0 +1,115 @@
+{
+    "$schema": "https://raw.githubusercontent.com/Microsoft/azure-pipelines-task-lib/master/tasks.schema.json",
+    "id": "3f7b8c9d-1e2f-4a5b-9c8d-7e6f5a4b3c2d",
+    "name": "cycodescan",
+    "friendlyName": "Cycode Security Scan",
+    "description": "Run a Cycode security scan (SAST, SCA, Secrets, IaC) on your codebase and publish results to a build results tab.",
+    "helpMarkDown": "Installs the Cycode CLI if not present, runs the scan, and attaches a rich HTML report to the build. Credentials are passed as environment variables and never appear in logs.",
+    "category": "Test",
+    "visibility": [
+        "Build",
+        "Release"
+    ],
+    "runsOn": [
+        "Agent",
+        "DeploymentGroup"
+    ],
+    "author": "Cycode",
+    "version": {
+        "Major": 0,
+        "Minor": 2,
+        "Patch": 0
+    },
+    "instanceNameFormat": "Cycode Security Scan",
+    "minimumAgentVersion": "2.206.1",
+    "execution": {
+        "Node20_1": {
+            "target": "out/index.js"
+        }
+    },
+    "groups": [
+        {
+            "name": "gating",
+            "displayName": "Pipeline Gating",
+            "isExpanded": true
+        },
+        {
+            "name": "advanced",
+            "displayName": "Advanced",
+            "isExpanded": false
+        }
+    ],
+    "inputs": [
+        {
+            "name": "CycodeClientID",
+            "type": "string",
+            "label": "Cycode Client ID",
+            "required": true,
+            "helpMarkDown": "Cycode API Client ID. Store this in a secret pipeline variable (e.g. `$(CycodeClientID)`)."
+        },
+        {
+            "name": "CycodeClientSecret",
+            "type": "string",
+            "label": "Cycode Client Secret",
+            "required": true,
+            "isConfidential": true,
+            "helpMarkDown": "Cycode API Client Secret. Store this in a secret pipeline variable (e.g. `$(CycodeClientSecret)`)."
+        },
+        {
+            "name": "scanPath",
+            "type": "string",
+            "label": "Scan Path",
+            "defaultValue": "$(Build.SourcesDirectory)",
+            "required": false,
+            "helpMarkDown": "Directory to scan. Defaults to the repository root."
+        },
+        {
+            "name": "scanType",
+            "type": "pickList",
+            "label": "Scan Type",
+            "defaultValue": "all",
+            "required": false,
+            "helpMarkDown": "Which security scan type to run.",
+            "options": {
+                "all": "All (SAST + SCA + Secrets + IaC)",
+                "sast": "SAST (Static Application Security Testing)",
+                "sca": "SCA (Software Composition Analysis)",
+                "secrets": "Secrets Detection",
+                "iac": "IaC (Infrastructure as Code)"
+            }
+        },
+        {
+            "name": "severityThreshold",
+            "type": "pickList",
+            "label": "Severity Threshold",
+            "defaultValue": "Info",
+            "required": false,
+            "groupName": "gating",
+            "helpMarkDown": "Minimum severity level counted when 'Break Pipeline on Findings' is enabled. Findings below this level are still reported but do not fail the build.",
+            "options": {
+                "Info": "Info (all findings)",
+                "Low": "Low and above",
+                "Medium": "Medium and above",
+                "High": "High and above",
+                "Critical": "Critical only"
+            }
+        },
+        {
+            "name": "breakPipeline",
+            "type": "boolean",
+            "label": "Break Pipeline on Findings",
+            "defaultValue": "false",
+            "required": false,
+            "groupName": "gating",
+            "helpMarkDown": "Fail the pipeline task if one or more findings meet or exceed the severity threshold."
+        },
+        {
+            "name": "additionalFlags",
+            "type": "string",
+            "label": "Additional CLI Flags",
+            "required": false,
+            "groupName": "advanced",
+            "helpMarkDown": "Extra flags appended verbatim to the `cycode scan path` command (e.g. `--excluded-dirs tests`)."
+        }
+    ]
+}

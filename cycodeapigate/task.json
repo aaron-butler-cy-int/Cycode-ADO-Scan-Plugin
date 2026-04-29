@@ -1,0 +1,126 @@
+{
+    "$schema": "https://raw.githubusercontent.com/Microsoft/azure-pipelines-task-lib/master/tasks.schema.json",
+    "id": "4a8c9d0e-2f3a-5b6c-ad9e-8f7a6b5c4d3e",
+    "name": "cycodeapigate",
+    "friendlyName": "Cycode API Gate",
+    "description": "Query the Cycode Risk Intelligence Graph (RIG) for Open violations matching a repository and optionally fail the pipeline.",
+    "helpMarkDown": "Authenticates to the Cycode platform API and queries the Risk Intelligence Graph for Open violations. Supports filtering by severity, category, and risk score. No agent-side tooling required.",
+    "category": "Test",
+    "visibility": [
+        "Build",
+        "Release"
+    ],
+    "runsOn": [
+        "Agent",
+        "DeploymentGroup"
+    ],
+    "author": "Cycode",
+    "version": {
+        "Major": 0,
+        "Minor": 2,
+        "Patch": 0
+    },
+    "instanceNameFormat": "Cycode API Gate",
+    "minimumAgentVersion": "2.206.1",
+    "execution": {
+        "Node20_1": {
+            "target": "out/index.js"
+        }
+    },
+    "groups": [
+        {
+            "name": "filters",
+            "displayName": "Violation Filters",
+            "isExpanded": true
+        },
+        {
+            "name": "advanced",
+            "displayName": "Advanced",
+            "isExpanded": false
+        }
+    ],
+    "inputs": [
+        {
+            "name": "CycodeClientID",
+            "type": "string",
+            "label": "Cycode Client ID",
+            "required": true,
+            "helpMarkDown": "Cycode API Client ID. Store this in a secret pipeline variable."
+        },
+        {
+            "name": "CycodeClientSecret",
+            "type": "string",
+            "label": "Cycode Client Secret",
+            "required": true,
+            "isConfidential": true,
+            "helpMarkDown": "Cycode API Client Secret. Store this in a secret pipeline variable."
+        },
+        {
+            "name": "repoName",
+            "type": "string",
+            "label": "Repository Name",
+            "required": true,
+            "helpMarkDown": "Bare repository name as stored in Cycode's RIG (e.g. `my-service`). Check the Violations UI to confirm the exact name — it is NOT the full SCM path."
+        },
+        {
+            "name": "severityMin",
+            "type": "pickList",
+            "label": "Minimum Severity",
+            "defaultValue": "",
+            "required": false,
+            "groupName": "filters",
+            "helpMarkDown": "Only count violations at this severity or above. Leave blank to count all severities.",
+            "options": {
+                "": "All severities",
+                "Info": "Info and above",
+                "Low": "Low and above",
+                "Medium": "Medium and above",
+                "High": "High and above",
+                "Critical": "Critical only"
+            }
+        },
+        {
+            "name": "category",
+            "type": "pickList",
+            "label": "Category Filter",
+            "defaultValue": "",
+            "required": false,
+            "groupName": "filters",
+            "helpMarkDown": "Restrict results to a specific scan category.",
+            "options": {
+                "": "All categories",
+                "SAST": "SAST",
+                "SCA": "SCA",
+                "Secrets": "Secrets",
+                "IaC": "IaC",
+                "ContainerScanning": "Container Scanning"
+            }
+        },
+        {
+            "name": "riskScoreMin",
+            "type": "string",
+            "label": "Minimum Risk Score (0–100)",
+            "defaultValue": "",
+            "required": false,
+            "groupName": "filters",
+            "helpMarkDown": "Only count violations with a risk score at or above this value (0–100). Leave blank to ignore."
+        },
+        {
+            "name": "breakPipeline",
+            "type": "boolean",
+            "label": "Break Pipeline on Violations",
+            "defaultValue": "true",
+            "required": false,
+            "helpMarkDown": "Fail the pipeline task if any violations matching the filters are found."
+        },
+        {
+            "name": "apiUrl",
+            "type": "string",
+            "label": "Cycode API Base URL",
+            "defaultValue": "https://api.cycode.com",
+            "required": false,
+            "groupName": "advanced",
+            "helpMarkDown": "Override the Cycode API base URL for self-hosted or regional deployments."
+        }
+    ]
+}

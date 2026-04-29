@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <script>
+        window.onload = function () {
+            setTimeout(function () { document.body.style.opacity = "1"; }, 300);
+        };
+    </script>
+
+    <meta charset="utf-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Cycode Security Scan Results</title>
+
+    <link rel="icon" type="image/svg+xml" href="images/cycode-logo.svg" />
+
+    <style type="text/css">
+        html, body {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            overflow: auto;
+            opacity: 0;
+            transition: opacity 0.2s ease-in;
+        }
+        #wrapper {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
+    </style>
+</head>
+<body>
+    <div id="wrapper">
+        <p style="color:#546e7a; padding:24px; font-family:'Segoe UI',sans-serif;">
+            Loading Cycode scan results&hellip;
+        </p>
+    </div>
+    <script src="scripts/resultsTab.js"></script>
+</body>
+</html>

@@ -1,0 +1,17 @@
+{
+    "name": "cycodescan",
+    "version": "0.2.0",
+    "main": "out/index.js",
+    "scripts": {
+        "build": "tsc -p tsconfig.json"
+    },
+    "dependencies": {
+        "azure-pipelines-task-lib": "^5.0.0",
+        "sanitize-html": "^2.13.0"
+    },
+    "devDependencies": {
+        "@types/node": "^25.6.0",
+        "@types/sanitize-html": "^2.13.0",
+        "typescript": "^5.0.0"
+    }
+}

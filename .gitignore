@@ -1,0 +1,16 @@
+.DS_Store
+.claude/
+.cycode/
+node_modules/
+dist/
+builds/
+*.vsix
+cycodescan/node_modules/
+cycodescan/docker_env
+cycodescan/lib/
+cycodescan/out/
+cycodescan/bin/
+cycodeapigate/node_modules/
+cycodeapigate/lib/
+cycodeapigate/out/
+cycodeapigate/bin/

@@ -1,0 +1,43 @@
+name: Build & Package Extension
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: |
+            package-lock.json
+            cycodescan/package-lock.json
+            cycodeapigate/package-lock.json
+
+      - name: Install dependencies
+        run: |
+          npm install --prefix cycodescan
+          npm install --prefix cycodeapigate
+          npm install
+
+      - name: Build and package extension
+        run: npm run build
+        env:
+          TFX_TOKEN: ${{ secrets.TFX_TOKEN }}
+
+      - name: Upload VSIX artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cycode-extension-vsix
+          path: builds/*.vsix
+          if-no-files-found: error

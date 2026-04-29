@@ -1,0 +1,27 @@
+{
+    "name": "cycode-ado-plugin",
+    "version": "0.2.0",
+    "scripts": {
+        "build:tasks": "npm run build --prefix cycodescan && npm run build --prefix cycodeapigate",
+        "build:ui": "webpack",
+        "build": "npm run build:tasks && npm run build:ui && npm run package",
+        "package": "tfx extension create --manifest-globs vss-extension.json --output-path builds",
+        "clean": "rimraf dist builds *.vsix cycodescan/out cycodeapigate/out",
+        "version:bump": "node scripts/increment-version.js",
+        "version:bump:minor": "node scripts/increment-version.js --minor",
+        "version:bump:major": "node scripts/increment-version.js --major"
+    },
+    "devDependencies": {
+        "@types/node": "^25.6.0",
+        "rimraf": "^5.0.0",
+        "tfx-cli": "^0.17.0",
+        "ts-loader": "^9.0.0",
+        "typescript": "^5.0.0",
+        "webpack": "^5.0.0",
+        "webpack-cli": "^5.0.0"
+    },
+    "dependencies": {
+        "azure-devops-extension-api": "^4.0.0",
+        "azure-devops-extension-sdk": "^4.0.0"
+    }
+}
