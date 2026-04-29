@@ -1,6 +1,6 @@
 {
     "name": "cycodescan",
-    "version": "0.2.0",
+    "version": "0.2.7",
     "main": "out/index.js",
     "scripts": {
         "build": "tsc -p tsconfig.json"

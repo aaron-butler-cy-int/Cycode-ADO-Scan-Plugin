@@ -59,6 +59,20 @@ const SEVERITY_COLORS: Record<string, string> = {
     Info:     '#546e7a',
 };
 
+const ALL_SCAN_TYPES = ['sast', 'sca', 'secret', 'iac'] as const;
+type ScanType = typeof ALL_SCAN_TYPES[number];
+
+function parseScanTypes(input: string): ScanType[] {
+    const normalized = input.trim().toLowerCase();
+    if (!normalized || normalized === 'all') return [...ALL_SCAN_TYPES];
+    const requested = normalized.split(',').map(t => t.trim()).filter(Boolean);
+    const valid = requested.filter((t): t is ScanType => (ALL_SCAN_TYPES as readonly string[]).includes(t));
+    const invalid = requested.filter(t => !(ALL_SCAN_TYPES as readonly string[]).includes(t));
+    if (invalid.length) console.log(`Warning: ignoring unrecognised scan type(s): ${invalid.join(', ')}`);
+    if (!valid.length) throw new Error(`No valid scan types in "${input}". Valid: ${ALL_SCAN_TYPES.join(', ')}`);
+    return valid;
+}
+
 function normalizeSeverity(raw: string | undefined): string {
     if (!raw) return 'Info';
     const s = raw.charAt(0).toUpperCase() + raw.slice(1).toLowerCase();
@@ -345,7 +359,7 @@ function generateHtmlReport(
 <h1>Cycode Security Scan Results</h1>
 <div class="meta">
   Scan path: <code>${sanitizeHtmlInput(scanPath)}</code> &middot;
-  Scan type: <strong>${sanitizeHtmlInput(scanType)}</strong>
+  Scan type(s): <strong>${sanitizeHtmlInput(scanType)}</strong>
 </div>
 
 <div class="summary-grid">
@@ -421,10 +435,10 @@ async function run(): Promise<void> {
         const clientId     = tl.getInput('CycodeClientID', true)!;
         const clientSecret = tl.getInput('CycodeClientSecret', true)!;
         const scanPath     = tl.getInput('scanPath') || tl.getVariable('Build.SourcesDirectory') || '.';
-        const scanType     = tl.getInput('scanType') || 'all';
         const sevThreshold = tl.getInput('severityThreshold') || 'Info';
         const breakPipeline = tl.getBoolInput('breakPipeline', false);
         const extraFlags   = tl.getInput('additionalFlags') || '';
+        const verbose      = tl.getBoolInput('verbose', false);
 
         // Ensure Cycode CLI is available, installing if necessary
         const cycodeExe = ensureCycodeInstalled();
@@ -432,38 +446,58 @@ async function run(): Promise<void> {
         const statusOut = (() => { try { return execSync(`${cycodeExe} status`, { shell: SHELL, encoding: 'utf8' }).trim(); } catch { return 'unknown'; } })();
         console.log(`Cycode CLI status: ${statusOut}`);
 
-        // Build scan command: cycode -o json scan --soft-fail [-t <type>] path <path>
-        const scanTypeFlag = scanType !== 'all' ? ` -t ${scanType}` : '';
+        const scanTypes    = parseScanTypes(tl.getInput('scanType') || 'all');
+        const verboseFlag  = verbose ? ' -v' : '';
         const extraStr     = extraFlags ? ` ${extraFlags}` : '';
         const quotedPath   = `"${scanPath.replace(/"/g, '\\"')}"`;
-        const scanCmd      = `${cycodeExe} -o json scan --soft-fail${scanTypeFlag}${extraStr} path ${quotedPath}`;
-
-        console.log(`Running: ${scanCmd}`);
 
         const credentials: Record<string, string> = {
             CYCODE_CLIENT_ID:     clientId,
             CYCODE_CLIENT_SECRET: clientSecret,
         };
 
-        const scanOutput = runScan(scanCmd, credentials);
+        const tempDir = tl.getVariable('Agent.TempDirectory') ?? __dirname;
 
-        // Parse JSON
-        let rawData: ScanOutput | Detection[];
-        try {
-            rawData = JSON.parse(scanOutput);
-        } catch {
-            throw new Error(
-                `Failed to parse Cycode output as JSON.\n` +
-                `First 500 chars: ${scanOutput.slice(0, 500)}`
-            );
+        const allDetections: Detection[] = [];
+        const failedTypes: string[] = [];
+
+        for (const type of scanTypes) {
+            console.log(`\nStarting ${type} scan...`);
+            const scanCmd = `${cycodeExe}${verboseFlag} --no-progress-meter --no-update-notifier -o json scan --soft-fail -t ${type}${extraStr} path ${quotedPath}`;
+            console.log(`Running: ${scanCmd}`);
+
+            let rawData: ScanOutput | Detection[];
+            try {
+                const scanOutput = runScan(scanCmd, credentials);
+                // Slice from the first { or [ to tolerate stray text before the JSON blob
+                const jsonStart = scanOutput.search(/[{[]/);
+                if (jsonStart === -1) throw new Error('no JSON found in output');
+                rawData = JSON.parse(scanOutput.slice(jsonStart));
+            } catch (err: any) {
+                console.log(`Warning: ${type} scan failed — ${err.message}`);
+                failedTypes.push(type);
+                continue;
+            }
+
+            // Upload per-type raw JSON artifact
+            const jsonFile = path.join(tempDir, `cycode_results_${type}.json`);
+            fs.writeFileSync(jsonFile, JSON.stringify(rawData, null, 2));
+            tl.uploadArtifact('Cycode', jsonFile, 'Cycode Scan Results');
+
+            const typeDetections = extractDetections(rawData);
+            console.log(`${type} scan complete — findings: ${typeDetections.length}`);
+            allDetections.push(...typeDetections);
         }
 
-        const detections = extractDetections(rawData);
-        console.log(`Scan complete. Total findings: ${detections.length}`);
+        if (failedTypes.length) {
+            console.log(`\nScan type(s) that failed: ${failedTypes.join(', ')}`);
+        }
+
+        console.log(`\nAll scans complete. Total findings: ${allDetections.length}`);
 
         // Severity breakdown for the log
         const counts: Record<string, number> = {};
-        for (const d of detections) {
+        for (const d of allDetections) {
             const s = normalizeSeverity(d.severity);
             counts[s] = (counts[s] ?? 0) + 1;
         }
@@ -471,15 +505,14 @@ async function run(): Promise<void> {
             if (counts[s]) console.log(`  ${s}: ${counts[s]}`);
         }
 
-        // Write HTML report and attach to build
-        const tempDir    = tl.getVariable('Agent.TempDirectory') ?? __dirname;
+        // Write combined HTML report and attach to build results tab
         const reportFile = path.join(tempDir, 'cycode_results.html');
-        fs.writeFileSync(reportFile, generateHtmlReport(detections, scanPath, scanType));
+        fs.writeFileSync(reportFile, generateHtmlReport(allDetections, scanPath, scanTypes.join(', ')));
         console.log(`##vso[task.addattachment type=cycode.scan.result;name=content;]${reportFile}`);
 
         // Gate: count findings at or above threshold
         const thresholdRank  = severityRank(sevThreshold);
-        const flaggedCount   = detections.filter(d => severityRank(d.severity ?? 'Info') <= thresholdRank).length;
+        const flaggedCount   = allDetections.filter((d: Detection) => severityRank(d.severity ?? 'Info') <= thresholdRank).length;
 
         if (breakPipeline) {
             if (flaggedCount > 0) {
@@ -493,7 +526,7 @@ async function run(): Promise<void> {
             }
         } else {
             console.log(
-                `Cycode scan found ${detections.length} finding(s). ` +
+                `Cycode scan found ${allDetections.length} finding(s). ` +
                 `Break pipeline is disabled — pipeline will continue.`
             );
         }

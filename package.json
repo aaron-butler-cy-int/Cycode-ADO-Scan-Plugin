@@ -1,18 +1,19 @@
 {
     "name": "cycode-ado-plugin",
-    "version": "0.2.0",
+    "version": "0.2.7",
     "scripts": {
-        "build:tasks": "npm run build --prefix cycodescan && npm run build --prefix cycodeapigate",
+        "build:tasks": "npx ncc build cycodescan/index.ts -o cycodescan/ncc_out && npx ncc build cycodeapigate/index.ts -o cycodeapigate/ncc_out",
         "build:ui": "webpack",
         "build": "npm run build:tasks && npm run build:ui && npm run package",
-        "package": "tfx extension create --manifest-globs vss-extension.json --output-path builds",
-        "clean": "rimraf dist builds *.vsix cycodescan/out cycodeapigate/out",
+        "package": "npx tfx extension create --manifest-globs vss-extension.json --output-path builds",
+        "clean": "rimraf dist builds *.vsix cycodescan/out cycodescan/ncc_out cycodeapigate/out cycodeapigate/ncc_out",
         "version:bump": "node scripts/increment-version.js",
         "version:bump:minor": "node scripts/increment-version.js --minor",
         "version:bump:major": "node scripts/increment-version.js --major"
     },
     "devDependencies": {
         "@types/node": "^25.6.0",
+        "@vercel/ncc": "^0.38.4",
         "rimraf": "^5.0.0",
         "tfx-cli": "^0.17.0",
         "ts-loader": "^9.0.0",

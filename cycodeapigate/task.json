@@ -18,13 +18,13 @@
     "version": {
         "Major": 0,
         "Minor": 2,
-        "Patch": 0
+        "Patch": 7
     },
     "instanceNameFormat": "Cycode API Gate",
     "minimumAgentVersion": "2.206.1",
     "execution": {
         "Node20_1": {
-            "target": "out/index.js"
+            "target": "ncc_out/index.js"
         }
     },
     "groups": [

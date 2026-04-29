@@ -9,8 +9,10 @@ cycodescan/node_modules/
 cycodescan/docker_env
 cycodescan/lib/
 cycodescan/out/
+cycodescan/ncc_out/
 cycodescan/bin/
 cycodeapigate/node_modules/
 cycodeapigate/lib/
 cycodeapigate/out/
+cycodeapigate/ncc_out/
 cycodeapigate/bin/

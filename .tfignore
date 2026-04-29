@@ -1,0 +1,12 @@
+cycodescan/node_modules
+cycodescan/out
+cycodescan/index.ts
+cycodescan/tsconfig.json
+cycodescan/package.json
+cycodescan/package-lock.json
+cycodeapigate/node_modules
+cycodeapigate/out
+cycodeapigate/index.ts
+cycodeapigate/tsconfig.json
+cycodeapigate/package.json
+cycodeapigate/package-lock.json

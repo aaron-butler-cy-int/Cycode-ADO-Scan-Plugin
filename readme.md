@@ -23,7 +23,7 @@ ADO-Cycode-Plugin/
 ├── scripts/
 │   └── increment-version.js  # Bumps version across all manifests
 ├── images/
-│   └── cycode-logo.svg       # Publisher icon
+│   └── cycode-logo.png       # Publisher icon
 ├── index.html                # Entry point for the build results tab
 ├── overview.md               # Marketplace listing content
 ├── vss-extension.json        # Extension manifest
@@ -68,14 +68,14 @@ ADO-Cycode-Plugin/
 3. **Publish to the marketplace** (requires a PAT with Marketplace publish scope):
 
    ```bash
-   tfx extension publish --manifest-globs vss-extension.json \
+   npx tfx extension publish --manifest-globs vss-extension.json \
      --token <your-PAT>
    ```
 
    To share a private build with a specific organisation without publishing publicly:
 
    ```bash
-   tfx extension publish --manifest-globs vss-extension.json \
+   npx tfx extension publish --manifest-globs vss-extension.json \
      --token <your-PAT> \
      --share-with <your-org>
    ```
@@ -155,7 +155,7 @@ The only way to test the UI results tab and full pipeline integration. Setup is 
    npm install --prefix cycodeapigate
    npm install
    npm run build
-   tfx extension publish --manifest-globs vss-extension.json \
+   npx tfx extension publish --manifest-globs vss-extension.json \
      --token <PAT> --share-with <your-org>
    ```
 
