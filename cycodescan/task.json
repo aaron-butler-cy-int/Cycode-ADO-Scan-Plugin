@@ -18,7 +18,7 @@
     "version": {
         "Major": 0,
         "Minor": 2,
-        "Patch": 9
+        "Patch": 15
     },
     "instanceNameFormat": "Cycode Security Scan",
     "minimumAgentVersion": "2.206.1",

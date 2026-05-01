@@ -16,3 +16,5 @@ cycodeapigate/lib/
 cycodeapigate/out/
 cycodeapigate/ncc_out/
 cycodeapigate/bin/
+json_examples
+json_examples/*

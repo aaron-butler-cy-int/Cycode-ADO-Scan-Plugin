@@ -1,7 +1,7 @@
 {
     "manifestVersion": 1,
     "id": "CycodeSecurityScan",
-    "version": "0.2.9",
+    "version": "0.2.15",
     "name": "Cycode Security Scan",
     "description": "Run Cycode security scans (SAST, SCA, Secrets, IaC) and view results as a dedicated build results tab.",
     "publisher": "AaronButler-Cycode",

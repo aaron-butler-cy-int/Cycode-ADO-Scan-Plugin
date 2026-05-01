@@ -10,9 +10,20 @@ const SHELL = process.platform === 'win32' ? (process.env['ComSpec'] ?? 'cmd.exe
 // Types matching the Cycode CLI JSON output schema
 // ---------------------------------------------------------------------------
 
+interface ScaAlert {
+    cve_identifier?: string;
+    ghsa_identifier?: string;
+    description?: string;
+    dependency_paths?: string;
+    affected_package_name?: string;
+    first_patched_version?: string;
+    vulnerable_requirements?: string;
+}
+
 interface DetectionDetails {
     file_path?: string;
     file_name?: string;
+    manifest_file_path?: string;
     line?: number | string;
     cwe?: string[];
     owasp?: string[];
@@ -24,6 +35,8 @@ interface DetectionDetails {
     description?: string;
     detection_rule_id?: string;
     policy_id?: string;
+    alert?: ScaAlert;
+    package_ecosystem?: string;
 }
 
 interface Detection {
@@ -216,7 +229,7 @@ function extractDetections(data: ScanOutput | Detection[]): Detection[] {
 }
 
 // ---------------------------------------------------------------------------
-// HTML report generator (ported from cycode-summary.py)
+// HTML report generation — tabbed layout per scan type
 // ---------------------------------------------------------------------------
 
 function sanitizeHtmlInput(val: string | number | undefined): string {
@@ -224,202 +237,555 @@ function sanitizeHtmlInput(val: string | number | undefined): string {
 }
 
 
-function normalizeFilePath(p: string): string {
+function normalizeFilePath(p: string, basePath?: string): string {
     if (!p) return '';
-    // Strip ADO hosted-agent workspace prefix: /_work/<n>/s/...
-    const adoMatch = p.match(/\/_work\/\d+\/s\/(.+)$/);
+    // Strip ADO hosted-agent workspace prefix: /_work/<n>/s/... or /work/<n>/s/...
+    const adoMatch = p.match(/\/_?work\/\d+\/s\/(.+)$/);
     if (adoMatch) return adoMatch[1];
-    // Strip Windows-style agent path: \agent\_work\<n>\s\...
-    const winMatch = p.match(/[\\\/]_work[\\\/]\d+[\\\/]s[\\\/](.+)$/);
+    // Strip Windows-style agent path: \agent\_work\<n>\s\... or \work\<n>\s\...
+    const winMatch = p.match(/[\\\/]_?work[\\\/]\d+[\\\/]s[\\\/](.+)$/);
     if (winMatch) return winMatch[1].replace(/\\/g, '/');
-    return p.replace(/^\/+/, '');
+    // Strip the configured scan path so only the repo-relative portion is shown
+    let normalized = p.replace(/\\/g, '/');
+    if (basePath) {
+        const base = basePath.replace(/\\/g, '/').replace(/\/+$/, '') + '/';
+        if (normalized.toLowerCase().startsWith(base.toLowerCase())) {
+            return normalized.slice(base.length);
+        }
+    }
+    return normalized.replace(/^\/+/, '');
+}
+
+interface BuildInfo {
+    repo:   string;
+    branch: string;
+    commit: string;
+}
+
+function buildDescBlock(desc: string, rem: string): string {
+    const short = desc.length > 180 ? desc.slice(0, 180) + '…' : desc;
+    const parts: string[] = [`<div>${sanitizeHtmlInput(short)}</div>`];
+    if (desc.length > 180)
+        parts.push(`<details><summary>Full description</summary><div class="content">${sanitizeHtmlInput(desc)}</div></details>`);
+    if (rem)
+        parts.push(`<details><summary>Mitigation guidance</summary><div class="content">${sanitizeHtmlInput(rem)}</div></details>`);
+    return parts.join('');
+}
+
+function getTypeHeaders(type: string): string {
+    const si = '<span class="sort-icon"></span>';
+    switch (type) {
+        case 'sast':
+            return `<th data-col-idx="0" class="sortable" style="width:110px">Severity${si}</th>` +
+                `<th data-col-idx="1" class="sortable">Rule / Policy${si}</th>` +
+                `<th data-col-idx="2" class="sortable">Description &amp; Mitigation${si}</th>` +
+                `<th data-col-idx="3" class="sortable" style="width:260px">File &amp; Line${si}</th>` +
+                `<th data-col-idx="4" class="sortable" style="width:200px">CWE / Language${si}</th>`;
+        case 'sca':
+            return `<th data-col-idx="0" class="sortable" style="width:110px">Severity${si}</th>` +
+                `<th data-col-idx="1" class="sortable" style="width:240px">Package / CVE / GHSA${si}</th>` + // Updated text & width
+                `<th data-col-idx="2" class="sortable">Dependency Path${si}</th>` +
+                `<th data-col-idx="3" class="sortable" style="width:220px">Manifest File${si}</th>` +
+                `<th data-col-idx="4" class="sortable">Remediation${si}</th>`;
+        case 'sca_license':
+            return `<th data-col-idx="0" class="sortable" style="width:110px">Severity${si}</th>` +
+                `<th data-col-idx="1" class="sortable" style="width:200px">License Type${si}</th>` +
+                `<th data-col-idx="2" class="sortable" style="width:240px">Package File${si}</th>` +
+                `<th data-col-idx="3" class="sortable">Description${si}</th>` +
+                `<th data-col-idx="4" class="sortable" style="width:200px">Remediation${si}</th>`;
+        case 'secrets':
+            return `<th data-col-idx="0" class="sortable" style="width:110px">Severity${si}</th>` +
+                `<th data-col-idx="1" class="sortable" style="width:200px">Secret Type${si}</th>` +
+                `<th data-col-idx="2" class="sortable" style="width:280px">File &amp; Line${si}</th>` +
+                `<th data-col-idx="3" class="sortable">Description${si}</th>`;
+        case 'container':
+            return `<th data-col-idx="0" class="sortable" style="width:110px">Severity${si}</th>` +
+                `<th data-col-idx="1" class="sortable">Rule / CVE${si}</th>` +
+                `<th data-col-idx="2" class="sortable" style="width:240px">File${si}</th>` +
+                `<th data-col-idx="3" class="sortable">Description &amp; Mitigation${si}</th>` +
+                `<th data-col-idx="4" class="sortable" style="width:180px">References${si}</th>`;
+        default:
+            return `<th data-col-idx="0" class="sortable" style="width:110px">Severity${si}</th>` +
+                `<th data-col-idx="1" class="sortable">Issue${si}</th>` +
+                `<th data-col-idx="2" class="sortable">Description${si}</th>` +
+                `<th data-col-idx="3" class="sortable">File &amp; Line${si}</th>` +
+                `<th data-col-idx="4" class="sortable">Details${si}</th>`;
+    }
+}
+
+function buildTypeRows(type: string, detections: Detection[], scanPath: string): string {
+    return detections.map(d => {
+        const sev      = normalizeSeverity(d.severity);
+        const color    = SEVERITY_COLORS[sev] ?? '#546e7a';
+        const dd       = d.detection_details ?? {};
+        const filePath = normalizeFilePath(dd.file_path ?? '', scanPath);
+        const line     = dd.line ?? '';
+
+        const sevCell  = `<td><span class="sev" style="background:${color};">${sanitizeHtmlInput(sev)}</span></td>`;
+        const fileCell = `<td><div class="file">${sanitizeHtmlInput(filePath)}</div>` +
+                         `${line ? `<div class="line">Line ${sanitizeHtmlInput(line)}</div>` : ''}</td>`;
+
+        switch (type) {
+            case 'sast': {
+                const rule  = sanitizeHtmlInput(dd.policy_display_name ?? d.detection_rule_id ?? 'Unknown');
+                const desc  = (dd.description ?? d.message ?? '').trim();
+                const rem   = (dd.remediation_guidelines ?? dd.custom_remediation_guidelines ?? '').trim();
+                const cwe   = Array.isArray(dd.cwe) ? dd.cwe.join('; ') : '';
+                const owasp = Array.isArray(dd.owasp) ? dd.owasp.join('; ') : '';
+                const langs = Array.isArray(dd.languages) ? dd.languages.join(', ') : '';
+
+                const metaParts: string[] = [];
+                if (cwe)   metaParts.push(`<div><strong>CWE:</strong> ${sanitizeHtmlInput(cwe)}</div>`);
+                if (owasp) metaParts.push(`<div><strong>OWASP:</strong> ${sanitizeHtmlInput(owasp)}</div>`);
+                if (langs) metaParts.push(`<div><strong>Lang:</strong> ${sanitizeHtmlInput(langs)}</div>`);
+                const metaHtml = metaParts.join('') || '<span style="color:var(--muted)">—</span>';
+
+                const hs = [sev, rule, desc, filePath, String(line), cwe, owasp, langs].join(' ').toLowerCase();
+                return `<tr data-severity="${sanitizeHtmlInput(sev)}" data-sev-rank="${SEVERITY_ORDER.indexOf(sev)}" data-type="${sanitizeHtmlInput(d.type ?? '')}" data-search="${sanitizeHtmlInput(hs)}">` +
+                    sevCell +
+                    `<td><strong>${rule}</strong></td>` +
+                    `<td>${buildDescBlock(desc, rem)}</td>` +
+                    fileCell +
+                    `<td class="meta-col">${metaHtml}</td>` +
+                    `</tr>`;
+            }
+            case 'sca': {
+                const alert = dd.alert ?? {};
+                const cve = alert.cve_identifier ?? '';
+                const ghsa = alert.ghsa_identifier ?? '';
+                const desc = (alert.description ?? '').trim();
+                const depPath = (alert.dependency_paths ?? '').trim();
+                const rem = (dd.remediation_guidelines ?? dd.custom_remediation_guidelines ?? '').trim();
+                const manifestPath = normalizeFilePath(dd.manifest_file_path ?? dd.file_name ?? '', scanPath);
+
+                // Extract package name & version from the alert object
+                const pkgName = alert.affected_package_name ?? '';
+                const pkgVer = alert.vulnerable_requirements ?? '';
+                const pkgDisplay = pkgName ? `${pkgName}@${pkgVer}` : 'Unknown';
+                const ecosystem = dd.package_ecosystem ?? 'Unknown'; // 
+
+                // Build the Package / CVE / GHSA column content
+                const idParts: string[] = [];
+                idParts.push(`<div><strong>Ecosystem:</strong> ${sanitizeHtmlInput(ecosystem)}</div>`); 
+                idParts.push(`<div><strong>Package:</strong> ${sanitizeHtmlInput(pkgDisplay)}</div>`);
+                if (cve) idParts.push(`<div><strong>CVE:</strong> ${sanitizeHtmlInput(cve)}</div>`);
+                if (ghsa) idParts.push(`<div><strong>GHSA:</strong> ${sanitizeHtmlInput(ghsa)}</div>`);
+
+                const descShort = desc.length > 200 ? desc.slice(0, 200) + '…' : desc;
+                if (descShort) idParts.push(`<div style="margin-top:4px;color:var(--muted);font-size:12px">${sanitizeHtmlInput(descShort)}</div>`);
+                if (desc.length > 200) idParts.push(`<details><summary>Full description</summary><div class="content">${sanitizeHtmlInput(desc)}</div></details>`);
+                const idHtml = idParts.join('') || '<span style="color:var(--muted)">—</span>';
+
+                const depSegments = depPath ? depPath.split(/\s*,\s*/).map(s => s.trim()).filter(Boolean) : [];
+                const depHtml = depSegments.length > 0
+                    ? depSegments.map(s => `<div style="font-size:12px; margin-bottom:2px;">${sanitizeHtmlInput(s)}</div>`).join('')
+                    : '<span style="color:var(--muted)">—</span>';
+
+                const remShort = rem.length > 180 ? rem.slice(0, 180) + '…' : rem;
+                const remParts: string[] = [`<div>${remShort ? sanitizeHtmlInput(remShort) : '<span style="color:var(--muted)">—</span>'}</div>`];
+                if (rem.length > 180) remParts.push(`<details><summary>Full guidance</summary><div class="content">${sanitizeHtmlInput(rem)}</div></details>`);
+
+                const hs = [sev, ecosystem, pkgName, pkgVer, cve, ghsa, desc, depPath, manifestPath, rem].join(' ').toLowerCase();
+
+
+                return `<tr data-severity="${sanitizeHtmlInput(sev)}" data-sev-rank="${SEVERITY_ORDER.indexOf(sev)}" data-type="${sanitizeHtmlInput(d.type ?? '')}" data-search="${sanitizeHtmlInput(hs)}">` +
+                    sevCell +
+                    `<td>${idHtml}</td>` +
+                    `<td>${depHtml}</td>` + // ✅ Changed from depParts.join('')
+                    `<td><div class="file">${sanitizeHtmlInput(manifestPath) || '<span style="color:var(--muted)">—</span>'}</div></td>` +
+                    `<td>${remParts.join('')}</td>` +
+                    `</tr>`;
+            }
+            case 'sca_license': {
+                const license = sanitizeHtmlInput(dd.policy_display_name ?? d.detection_rule_id ?? 'Unknown');
+                const desc    = (dd.description ?? d.message ?? '').trim();
+                const rem     = (dd.remediation_guidelines ?? dd.custom_remediation_guidelines ?? '').trim();
+
+                const descShort = desc.length > 180 ? desc.slice(0, 180) + '…' : desc;
+                const descParts: string[] = [`<div>${sanitizeHtmlInput(descShort) || '<span style="color:var(--muted)">—</span>'}</div>`];
+                if (desc.length > 180)
+                    descParts.push(`<details><summary>Full description</summary><div class="content">${sanitizeHtmlInput(desc)}</div></details>`);
+
+                const remShort = rem.length > 120 ? rem.slice(0, 120) + '…' : rem;
+                const remParts: string[] = [`<div>${remShort ? sanitizeHtmlInput(remShort) : '<span style="color:var(--muted)">—</span>'}</div>`];
+                if (rem.length > 120)
+                    remParts.push(`<details><summary>Full guidance</summary><div class="content">${sanitizeHtmlInput(rem)}</div></details>`);
+
+                const hs = [sev, license, filePath, desc, rem].join(' ').toLowerCase();
+                return `<tr data-severity="${sanitizeHtmlInput(sev)}" data-sev-rank="${SEVERITY_ORDER.indexOf(sev)}" data-type="${sanitizeHtmlInput(d.type ?? '')}" data-search="${sanitizeHtmlInput(hs)}">` +
+                    sevCell +
+                    `<td><strong>${license}</strong></td>` +
+                    `<td><div class="file">${sanitizeHtmlInput(filePath)}</div></td>` +
+                    `<td>${descParts.join('')}</td>` +
+                    `<td class="meta-col">${remParts.join('')}</td>` +
+                    `</tr>`;
+            }
+            case 'secrets': {
+                const secretType = sanitizeHtmlInput(dd.policy_display_name ?? d.detection_rule_id ?? 'Unknown');
+                const desc       = (dd.description ?? d.message ?? '').trim();
+                const short      = desc.length > 180 ? desc.slice(0, 180) + '…' : desc;
+                const descParts: string[] = [`<div>${sanitizeHtmlInput(short)}</div>`];
+                if (desc.length > 180)
+                    descParts.push(`<details><summary>Full description</summary><div class="content">${sanitizeHtmlInput(desc)}</div></details>`);
+
+                const hs = [sev, secretType, desc, filePath, String(line)].join(' ').toLowerCase();
+                return `<tr data-severity="${sanitizeHtmlInput(sev)}" data-sev-rank="${SEVERITY_ORDER.indexOf(sev)}" data-type="${sanitizeHtmlInput(d.type ?? '')}" data-search="${sanitizeHtmlInput(hs)}">` +
+                    sevCell +
+                    `<td><strong>${secretType}</strong></td>` +
+                    fileCell +
+                    `<td>${descParts.join('')}</td>` +
+                    `</tr>`;
+            }
+            case 'container': {
+                const vuln  = sanitizeHtmlInput(dd.policy_display_name ?? d.detection_rule_id ?? 'Unknown');
+                const desc  = (dd.description ?? d.message ?? '').trim();
+                const rem   = (dd.remediation_guidelines ?? dd.custom_remediation_guidelines ?? '').trim();
+                const cwe   = Array.isArray(dd.cwe) ? dd.cwe.join('; ') : '';
+                const owasp = Array.isArray(dd.owasp) ? dd.owasp.join('; ') : '';
+
+                const refParts: string[] = [];
+                if (cwe)   refParts.push(`<div><strong>CVE/CWE:</strong> ${sanitizeHtmlInput(cwe)}</div>`);
+                if (owasp) refParts.push(`<div><strong>OWASP:</strong> ${sanitizeHtmlInput(owasp)}</div>`);
+                const refHtml = refParts.join('') || '<span style="color:var(--muted)">—</span>';
+
+                const hs = [sev, vuln, filePath, desc, rem, cwe, owasp].join(' ').toLowerCase();
+                return `<tr data-severity="${sanitizeHtmlInput(sev)}" data-sev-rank="${SEVERITY_ORDER.indexOf(sev)}" data-type="${sanitizeHtmlInput(d.type ?? '')}" data-search="${sanitizeHtmlInput(hs)}">` +
+                    sevCell +
+                    `<td><strong>${vuln}</strong></td>` +
+                    `<td><div class="file">${sanitizeHtmlInput(filePath)}</div>${line ? `<div class="line">Line ${sanitizeHtmlInput(line)}</div>` : ''}</td>` +
+                    `<td>${buildDescBlock(desc, rem)}</td>` +
+                    `<td class="meta-col">${refHtml}</td>` +
+                    `</tr>`;
+            }
+            default: {
+                const issueName = sanitizeHtmlInput(dd.policy_display_name ?? d.detection_rule_id ?? 'Unknown');
+                const desc      = (dd.description ?? d.message ?? '').trim();
+                const short     = desc.length > 180 ? desc.slice(0, 180) + '…' : desc;
+                const hs = [sev, issueName, desc, filePath, String(line)].join(' ').toLowerCase();
+                return `<tr data-severity="${sanitizeHtmlInput(sev)}" data-sev-rank="${SEVERITY_ORDER.indexOf(sev)}" data-type="${sanitizeHtmlInput(d.type ?? '')}" data-search="${sanitizeHtmlInput(hs)}">` +
+                    sevCell +
+                    `<td><strong>${issueName}</strong></td>` +
+                    `<td>${sanitizeHtmlInput(short)}</td>` +
+                    fileCell +
+                    `<td>—</td>` +
+                    `</tr>`;
+            }
+        }
+    }).join('\n    ');
 }
 
 function generateHtmlReport(
     detections: Detection[],
     scanPath: string,
-    scanType: string
+    scanType: string,
+    buildInfo: BuildInfo
 ): string {
+    // Overall severity counts for summary cards
     const counts: Record<string, number> = {};
     for (const d of detections) {
         const s = normalizeSeverity(d.severity);
         counts[s] = (counts[s] ?? 0) + 1;
     }
-
     const presentSevs = SEVERITY_ORDER.filter(s => counts[s] > 0);
-    const presentTypes = [...new Set(detections.map(d => d.type ?? '').filter(Boolean))].sort();
-
     const summaryCards = [
         `<div class="summary-card"><div class="label">Total</div><div class="value">${detections.length}</div></div>`,
         ...presentSevs.map(sev =>
-            `<div class="summary-card">` +
-            `<div class="label">${sev}</div>` +
-            `<div class="value" style="color:${SEVERITY_COLORS[sev]};">${counts[sev]}</div>` +
-            `</div>`
+            `<div class="summary-card"><div class="label">${sev}</div>` +
+            `<div class="value" style="color:${SEVERITY_COLORS[sev]};">${counts[sev]}</div></div>`
         ),
     ].join('\n  ');
 
-    const severityOptions = presentSevs.map(s => `<option value="${s}">${s}</option>`).join('\n    ');
-    const typeOptions = presentTypes.map(t => `<option value="${sanitizeHtmlInput(t)}">${sanitizeHtmlInput(t)}</option>`).join('\n    ');
+    // Map Cycode detection type values to display tabs (case-insensitive key lookup)
+    const TYPE_TO_TAB: Record<string, string> = {
+        'sast':                       'sast',
+        'vulnerable_code_dependency': 'sca',
+        'non permissive license':     'sca_license',
+        'generic-password':           'secrets',
+        'private-key':                'secrets',
+        'file':                       'container',
+    };
 
-    const rows = detections.map(d => {
-        const sev   = normalizeSeverity(d.severity);
-        const color = SEVERITY_COLORS[sev] ?? '#546e7a';
-        const dd    = d.detection_details ?? {};
-        const issueName   = sanitizeHtmlInput(dd.policy_display_name ?? d.detection_rule_id ?? 'Unknown');
-        const description = (dd.description ?? d.message ?? '').trim();
-        const descShort   = description.length > 180 ? description.slice(0, 180) + '…' : description;
-        const filePath    = normalizeFilePath(dd.file_path ?? '');
-        const line        = dd.line ?? '';
-        const cwe         = Array.isArray(dd.cwe) ? dd.cwe.join('; ') : '';
-        const owasp       = Array.isArray(dd.owasp) ? dd.owasp.join('; ') : '';
-        const category    = dd.category ?? '';
-        const languages   = Array.isArray(dd.languages) ? dd.languages.join(', ') : '';
-        const remediation = (dd.remediation_guidelines ?? dd.custom_remediation_guidelines ?? '').trim();
-        const type        = d.type ?? '';
+    const byTab: Record<string, Detection[]> = {};
+    for (const d of detections) {
+        const raw = (d.type ?? '').toLowerCase().trim();
+        const tab = TYPE_TO_TAB[raw] ?? (raw || 'other');
+        if (!byTab[tab]) byTab[tab] = [];
+        byTab[tab].push(d);
+    }
 
-        const metaParts: string[] = [];
-        if (cwe)       metaParts.push(`<div><strong>CWE:</strong> ${sanitizeHtmlInput(cwe)}</div>`);
-        if (owasp)     metaParts.push(`<div><strong>OWASP:</strong> ${sanitizeHtmlInput(owasp)}</div>`);
-        if (category)  metaParts.push(`<div><strong>Category:</strong> ${sanitizeHtmlInput(category)}</div>`);
-        if (languages) metaParts.push(`<div><strong>Language:</strong> ${sanitizeHtmlInput(languages)}</div>`);
-        const metaHtml = metaParts.join('') || '<span style="color:var(--muted)">—</span>';
+    const TAB_LABELS: Record<string, string> = {
+        sast:        'SAST',
+        sca:         'SCA',
+        sca_license: 'SCA License',
+        secrets:     'Secrets',
+        container:   'Container',
+    };
+    const TAB_ORDER = ['sast', 'sca', 'sca_license', 'secrets', 'container'];
+    const orderedTypes = [
+        ...TAB_ORDER.filter(t => byTab[t]?.length),
+        ...Object.keys(byTab).filter(t => !TAB_ORDER.includes(t) && byTab[t]?.length),
+    ];
 
-        const descParts: string[] = [`<div>${sanitizeHtmlInput(descShort)}</div>`];
-        if (description.length > 180) {
-            descParts.push(
-                `<details><summary>Full description</summary>` +
-                `<div class="content">${sanitizeHtmlInput(description)}</div></details>`
-            );
-        }
-        if (remediation) {
-            descParts.push(
-                `<details><summary>Mitigation guidance</summary>` +
-                `<div class="content">${sanitizeHtmlInput(remediation)}</div></details>`
-            );
-        }
-
-        const haystack = [sev, type, issueName, description, filePath, String(line), cwe, owasp, category, languages]
-            .join(' ').toLowerCase();
-
-        return (
-            `<tr data-severity="${sanitizeHtmlInput(sev)}" data-type="${sanitizeHtmlInput(type)}" data-search="${sanitizeHtmlInput(haystack)}">` +
-            `<td><span class="sev" style="background:${color};">${sanitizeHtmlInput(sev)}</span>` +
-            `<div style="margin-top:6px"><span class="type-badge">${sanitizeHtmlInput(type)}</span></div></td>` +
-            `<td><strong>${issueName}</strong></td>` +
-            `<td>${descParts.join('')}</td>` +
-            `<td><div class="file">${sanitizeHtmlInput(filePath)}</div>${line ? `<div class="line">Line ${sanitizeHtmlInput(line)}</div>` : ''}</td>` +
-            `<td class="meta-col">${metaHtml}</td>` +
-            `</tr>`
-        );
+    const tabButtons = orderedTypes.map((t, i) => {
+        const label = TAB_LABELS[t] ?? t.toUpperCase();
+        const cnt   = byTab[t].length;
+        return `<button class="tab-btn${i === 0 ? ' active' : ''}" data-tab="${t}">${sanitizeHtmlInput(label)}<span class="tab-count">${cnt}</span></button>`;
     }).join('\n    ');
 
-    const emptyRow = '<tr><td colspan="5" class="empty">No findings.</td></tr>';
+    const tabPanels = orderedTypes.map((t, i) => {
+        const tabDetections = byTab[t];
+        const rows    = buildTypeRows(t, tabDetections, scanPath);
+        const headers = getTypeHeaders(t);
+
+        const tabCounts: Record<string, number> = {};
+        for (const d of tabDetections) {
+            const s = normalizeSeverity(d.severity);
+            tabCounts[s] = (tabCounts[s] ?? 0) + 1;
+        }
+
+        return `<div class="tab-panel${i === 0 ? ' active' : ''}" id="panel-${t}" data-counts='${JSON.stringify(tabCounts)}'>` +
+            `<table class="findings">` +
+            `<thead><tr>${headers}</tr></thead>` +
+            `<tbody>${rows || '<tr><td colspan="10" class="empty">No findings.</td></tr>'}</tbody>` +
+            `</table></div>`;
+    }).join('\n');
+
+    const severityOptions = SEVERITY_ORDER
+        .filter(s => presentSevs.includes(s))
+        .map(s => `<option value="${s}">${s}</option>`).join('\n    ');
+
+    const shortCommit = buildInfo.commit ? buildInfo.commit.slice(0, 7) : '';
+    const metaLine1Parts: string[] = [];
+    if (buildInfo.repo)   metaLine1Parts.push(`Repo: <strong>${sanitizeHtmlInput(buildInfo.repo)}</strong>`);
+    if (buildInfo.branch) metaLine1Parts.push(`Branch: <strong>${sanitizeHtmlInput(buildInfo.branch)}</strong>`);
+    if (shortCommit)      metaLine1Parts.push(`Commit: <code>${sanitizeHtmlInput(shortCommit)}</code>`);
+    const metaLine1 = metaLine1Parts.join(' &middot; ');
+    const metaLine2Parts: string[] = [`Scan path: <code>${sanitizeHtmlInput(scanPath)}</code>`];
+    metaLine2Parts.push(`Scan type(s): <strong>${sanitizeHtmlInput(scanType)}</strong>`);
+    const metaLine2 = metaLine2Parts.join(' &middot; ');
 
     return `<!doctype html>
 <html lang="en">
-<head>
-<meta charset="utf-8">
+<head><meta charset="utf-8">
 <title>Cycode Scan Report</title>
 <style>
-  :root{--bg:#f7f8fa;--fg:#212121;--muted:#546e7a;--card:#fff;--border:#e0e3e7}
+  :root{--bg:#f7f8fa;--fg:#212121;--muted:#546e7a;--card:#fff;--border:#e0e3e7;--accent:#1565c0}
   *{box-sizing:border-box}
   body{margin:0;padding:24px;background:var(--bg);color:var(--fg);
     font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
     font-size:14px;line-height:1.45}
   h1{margin:0 0 8px;font-size:22px}
   .meta{color:var(--muted);margin-bottom:20px}
-  .summary-grid{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:20px}
+  .summary-grid{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:0}
+  .summary-section{margin-bottom:16px}
+  .summary-section>summary{cursor:pointer;font-size:12px;font-weight:600;text-transform:uppercase;
+    letter-spacing:.5px;color:var(--muted);list-style:none;user-select:none;padding:4px 0;
+    display:inline-flex;align-items:center;gap:4px}
+  .summary-section>summary::-webkit-details-marker{display:none}
+  .summary-section>summary::before{content:"▸";font-size:10px}
+  .summary-section[open]>summary::before{content:"▾"}
+  .summary-section>summary~*{margin-top:8px}
   .summary-card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:12px 16px;min-width:110px}
   .summary-card .label{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.4px}
   .summary-card .value{font-size:22px;font-weight:600;margin-top:2px}
+  .tab-nav{display:flex;gap:0;border-bottom:2px solid var(--border);margin-bottom:16px}
+  .tab-btn{background:none;border:none;border-bottom:3px solid transparent;margin-bottom:-2px;
+    padding:10px 18px;font-size:14px;font-weight:500;cursor:pointer;color:var(--muted);
+    display:flex;align-items:center;gap:8px;transition:color .15s}
+  .tab-btn:hover{color:var(--fg)}
+  .tab-btn.active{color:var(--accent);border-bottom-color:var(--accent)}
+  .tab-count{background:#eceff1;color:#37474f;border-radius:10px;padding:1px 7px;font-size:12px;font-weight:600}
+  .tab-btn.active .tab-count{background:#e3f2fd;color:var(--accent)}
+  .tab-panel{display:none}
+  .tab-panel.active{display:block}
   .controls{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px;align-items:center}
   .controls input,.controls select{padding:7px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;background:#fff}
   .controls input{flex:1;min-width:200px}
-  table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--border);border-radius:8px;overflow:hidden}
-  thead th{text-align:left;padding:10px 12px;font-size:12px;text-transform:uppercase;letter-spacing:.4px;color:var(--muted);background:#eceff1;border-bottom:1px solid var(--border)}
-  tbody td{padding:12px;vertical-align:top;border-bottom:1px solid var(--border)}
-  tbody tr:last-child td{border-bottom:none}
-  tbody tr.hidden{display:none}
+  .findings{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--border);border-radius:8px;overflow:hidden}
+  .findings thead th{text-align:left;padding:10px 12px;font-size:12px;text-transform:uppercase;letter-spacing:.4px;color:var(--muted);background:#eceff1;border-bottom:1px solid var(--border)}
+  .findings tbody td{padding:12px;vertical-align:top;border-bottom:1px solid var(--border)}
+  .findings tbody tr:last-child td{border-bottom:none}
+  .findings tbody tr.hidden{display:none}
   .sev{display:inline-block;padding:2px 10px;border-radius:10px;color:#fff;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.4px;white-space:nowrap}
-  .type-badge{display:inline-block;padding:2px 8px;border-radius:4px;background:#eceff1;color:#37474f;font-size:11px;font-weight:500}
   .file{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;word-break:break-all}
   .line{color:var(--muted)}
   .meta-col{color:var(--muted);font-size:12.5px}
   details{margin-top:6px}
-  details summary{cursor:pointer;color:#1565c0;font-size:12.5px;user-select:none;list-style:none}
+  details summary{cursor:pointer;color:var(--accent);font-size:12.5px;user-select:none;list-style:none}
   details summary::-webkit-details-marker{display:none}
-  details summary::before{content:"▸ ";color:#1565c0}
+  details summary::before{content:"▸ ";color:var(--accent)}
   details[open] summary::before{content:"▾ "}
-  details .content{margin-top:6px;padding:10px 12px;background:#fafbfc;border-left:3px solid #1565c0;border-radius:4px;font-size:13px;white-space:pre-wrap}
+  details .content{margin-top:6px;padding:10px 12px;background:#fafbfc;border-left:3px solid var(--accent);border-radius:4px;font-size:13px;white-space:pre-wrap}
   .empty{text-align:center;padding:40px;color:var(--muted)}
+  .sortable{cursor:pointer;user-select:none}
+  .sortable:hover{background:#dde0e4!important}
+  .sort-icon{display:inline-block;margin-left:4px;font-size:10px}
+  .sortable:not(.sort-asc):not(.sort-desc) .sort-icon::after{content:"↕";color:#b0bec5}
+  .sortable.sort-asc .sort-icon::after{content:"▲";color:var(--accent)}
+  .sortable.sort-desc .sort-icon::after{content:"▼";color:var(--accent)}
 </style>
 </head>
 <body>
 <h1>Cycode Security Scan Results</h1>
 <div class="meta">
-  Scan path: <code>${sanitizeHtmlInput(scanPath)}</code> &middot;
-  Scan type(s): <strong>${sanitizeHtmlInput(scanType)}</strong>
+  ${metaLine1}
+  <br>${metaLine2}
 </div>
 
-<div class="summary-grid">
-  ${summaryCards}
+<details class="summary-section" open>
+  <summary>Overall Summary</summary>
+  <div class="summary-grid">
+    ${summaryCards}
+  </div>
+</details>
+
+<div class="tab-nav">
+  ${tabButtons || '<span style="padding:10px 18px;color:var(--muted)">No findings</span>'}
 </div>
+
+<details class="summary-section" id="tab-summary-section" open>
+  <summary>Tab Summary</summary>
+  <div id="tab-summary" class="summary-grid"></div>
+</details>
 
 <div class="controls">
-  <input id="search" type="search" placeholder="Filter by file, issue name, description, CWE…">
+  <input id="search" type="search" placeholder="Search findings…">
   <select id="severity-filter">
     <option value="">All severities</option>
     ${severityOptions}
   </select>
-  <select id="type-filter">
-    <option value="">All types</option>
-    ${typeOptions}
-  </select>
+  <select id="type-filter" style="display:none"></select>
   <span id="shown-count" style="color:var(--muted);font-size:12px"></span>
 </div>
 
-<table id="findings">
-  <thead>
-    <tr>
-      <th style="width:110px">Severity</th>
-      <th>Issue Name</th>
-      <th>Description &amp; Mitigation</th>
-      <th style="width:270px">File &amp; Line</th>
-      <th style="width:220px">Metadata</th>
-    </tr>
-  </thead>
-  <tbody>
-    ${rows || emptyRow}
-  </tbody>
-</table>
+${tabPanels || '<p style="text-align:center;color:var(--muted);padding:40px">No findings detected.</p>'}
 
 <script>
 (function(){
-  var rows=document.querySelectorAll('#findings tbody tr');
+  var tabBtns=document.querySelectorAll('.tab-btn');
+  var allPanels=document.querySelectorAll('.tab-panel');
   var search=document.getElementById('search');
   var sevFilter=document.getElementById('severity-filter');
   var typeFilter=document.getElementById('type-filter');
   var shownCount=document.getElementById('shown-count');
-  function apply(){
+
+  function initSort(panel){
+    var table=panel.querySelector('.findings');
+    var tbody=table?table.querySelector('tbody'):null;
+    if(!tbody)return;
+    var headers=table.querySelectorAll('thead th[data-col-idx]');
+    var sortCol=0,sortDir=1;
+    function doSort(){
+      var rows=Array.prototype.slice.call(tbody.querySelectorAll('tr[data-severity]'));
+      rows.sort(function(a,b){
+        var av,bv;
+        if(sortCol===0){
+          av=parseInt(a.getAttribute('data-sev-rank')||'99',10);
+          bv=parseInt(b.getAttribute('data-sev-rank')||'99',10);
+          return sortDir*(av-bv);
+        }
+        var ac=a.cells[sortCol],bc=b.cells[sortCol];
+        av=(ac?(ac.textContent||''):'').trim().toLowerCase();
+        bv=(bc?(bc.textContent||''):'').trim().toLowerCase();
+        return sortDir*(av<bv?-1:av>bv?1:0);
+      });
+      rows.forEach(function(r){tbody.appendChild(r);});
+      headers.forEach(function(th){
+        th.classList.remove('sort-asc','sort-desc');
+        if(parseInt(th.getAttribute('data-col-idx'),10)===sortCol){
+          th.classList.add(sortDir===1?'sort-asc':'sort-desc');
+        }
+      });
+    }
+    headers.forEach(function(th){
+      th.addEventListener('click',function(){
+        var col=parseInt(th.getAttribute('data-col-idx'),10);
+        sortDir=sortCol===col?-sortDir:1;
+        sortCol=col;
+        doSort();
+      });
+    });
+    doSort();
+  }
+  allPanels.forEach(function(p){initSort(p);});
+
+  var SEV_ORDER=['Critical','High','Medium','Low','Info'];
+  var SEV_COLORS={Critical:'#b71c1c',High:'#e65100',Medium:'#f9a825',Low:'#1565c0',Info:'#546e7a'};
+  var tabSummaryEl=document.getElementById('tab-summary');
+  var tabSummarySection=document.getElementById('tab-summary-section');
+  function renderTabSummary(panel){
+    if(!tabSummaryEl||!panel)return;
+    var counts={};
+    try{counts=JSON.parse(panel.getAttribute('data-counts')||'{}');}catch(e){}
+    var total=Object.values(counts).reduce(function(a,b){return a+b;},0);
+    var html='<div class="summary-card"><div class="label">Total</div><div class="value">'+total+'</div></div>';
+    SEV_ORDER.forEach(function(s){
+      if(counts[s]){
+        html+='<div class="summary-card"><div class="label">'+s+'</div>'+
+          '<div class="value" style="color:'+SEV_COLORS[s]+';">'+counts[s]+'</div></div>';
+      }
+    });
+    tabSummaryEl.innerHTML=html;
+    if(tabSummarySection)tabSummarySection.style.display=total>0?'':'none';
+  }
+  renderTabSummary(document.querySelector('.tab-panel.active'));
+
+  function getActiveRows(){
+    var active=document.querySelector('.tab-panel.active');
+    return active?active.querySelectorAll('tbody tr[data-severity]'):[];
+  }
+  function updateTypeFilter(panel){
+    if(!typeFilter||!panel)return;
+    var rows=panel.querySelectorAll('tbody tr[data-type]');
+    var seen={};
+    rows.forEach(function(tr){var t=tr.getAttribute('data-type')||'';if(t)seen[t]=true;});
+    var types=Object.keys(seen);
+    if(types.length>1){
+      var html='<option value="">All types</option>';
+      types.forEach(function(t){html+='<option value="'+t+'">'+t+'</option>';});
+      typeFilter.innerHTML=html;
+      typeFilter.style.display='';
+    }else{
+      typeFilter.innerHTML='';
+      typeFilter.style.display='none';
+    }
+    typeFilter.value='';
+  }
+  function applyFilters(){
     var q=search.value.trim().toLowerCase();
     var sev=sevFilter.value;
-    var typ=typeFilter.value;
+    var typ=typeFilter?typeFilter.value:'';
+    var rows=getActiveRows();
     var shown=0;
     rows.forEach(function(tr){
       var match=
-        (!q||( tr.getAttribute('data-search')||'').indexOf(q)!==-1)&&
+        (!q||(tr.getAttribute('data-search')||'').indexOf(q)!==-1)&&
         (!sev||(tr.getAttribute('data-severity')||'')===sev)&&
         (!typ||(tr.getAttribute('data-type')||'')===typ);
       tr.classList.toggle('hidden',!match);
       if(match)shown++;
     });
-    shownCount.textContent='Showing '+shown+' of '+rows.length;
+    shownCount.textContent=rows.length>0?'Showing '+shown+' of '+rows.length:'';
   }
-  search.addEventListener('input',apply);
-  sevFilter.addEventListener('change',apply);
-  typeFilter.addEventListener('change',apply);
-  apply();
+  tabBtns.forEach(function(btn){
+    btn.addEventListener('click',function(){
+      tabBtns.forEach(function(b){b.classList.remove('active');});
+      allPanels.forEach(function(p){p.classList.remove('active');});
+      btn.classList.add('active');
+      var panel=document.getElementById('panel-'+btn.getAttribute('data-tab'));
+      if(panel)panel.classList.add('active');
+      renderTabSummary(panel);
+      updateTypeFilter(panel);
+      search.value='';
+      sevFilter.value='';
+      applyFilters();
+    });
+  });
+  search.addEventListener('input',applyFilters);
+  sevFilter.addEventListener('change',applyFilters);
+  if(typeFilter)typeFilter.addEventListener('change',applyFilters);
+  updateTypeFilter(document.querySelector('.tab-panel.active'));
+  applyFilters();
 })();
 </script>
 </body>
@@ -463,7 +829,8 @@ async function run(): Promise<void> {
 
         for (const type of scanTypes) {
             console.log(`\nStarting ${type} scan...`);
-            const scanCmd = `${cycodeExe}${verboseFlag} --no-progress-meter --no-update-notifier -o json scan --soft-fail -t ${type}${extraStr} path ${quotedPath}`;
+            // --no-progress-meter --no-update-notifier
+            const scanCmd = `${cycodeExe}${verboseFlag} -o json scan --soft-fail -t ${type}${extraStr} path ${quotedPath}`;
             console.log(`Running: ${scanCmd}`);
 
             let rawData: ScanOutput | Detection[];
@@ -507,7 +874,12 @@ async function run(): Promise<void> {
 
         // Write combined HTML report and attach to build results tab
         const reportFile = path.join(tempDir, 'cycode_results.html');
-        fs.writeFileSync(reportFile, generateHtmlReport(allDetections, scanPath, scanTypes.join(', ')));
+        const buildInfo: BuildInfo = {
+            repo:   tl.getVariable('Build.Repository.Name') ?? '',
+            branch: tl.getVariable('Build.SourceBranchName') ?? '',
+            commit: tl.getVariable('Build.SourceVersion') ?? '',
+        };
+        fs.writeFileSync(reportFile, generateHtmlReport(allDetections, scanPath, scanTypes.join(', '), buildInfo));
         console.log(`##vso[task.addattachment type=cycode.scan.result;name=content;]${reportFile}`);
 
         // Gate: count findings at or above threshold
