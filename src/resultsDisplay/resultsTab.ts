@@ -64,7 +64,7 @@ async function loadScanResults(build: Build): Promise<void> {
 
             const html = await contentResp.text();
             const iframe = document.createElement("iframe");
-            iframe.setAttribute("sandbox", "allow-scripts");
+            iframe.setAttribute("sandbox", "allow-scripts allow-popups allow-popups-to-escape-sandbox");
             iframe.style.cssText = "width:100%;height:100vh;border:none;display:block";
             iframe.srcdoc = html;
             wrapper.replaceChildren(iframe);

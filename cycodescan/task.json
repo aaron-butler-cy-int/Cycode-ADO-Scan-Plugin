@@ -18,7 +18,7 @@
     "version": {
         "Major": 0,
         "Minor": 2,
-        "Patch": 15
+        "Patch": 22
     },
     "instanceNameFormat": "Cycode Security Scan",
     "minimumAgentVersion": "2.206.1",
@@ -70,6 +70,18 @@
             "defaultValue": "all",
             "required": false,
             "helpMarkDown": "Scan types to run. Use `all` to run every type, or provide a comma-separated subset: `sast`, `sca`, `secret`, `iac`. Example: `sast,secret`."
+        },
+        {
+            "name": "scanMode",
+            "type": "pickList",
+            "label": "Scan Mode",
+            "defaultValue": "path",
+            "required": false,
+            "helpMarkDown": "**Full scan** scans the entire repository path. **Commit history** scans only changes since the previous commit using `cycode scan commit-history -r <prev>..<current>`, reducing scan time on large repos.",
+            "options": {
+                "path": "Full scan (scan path)",
+                "commitHistory": "Commit history (changes since last commit)"
+            }
         },
         {
             "name": "severityThreshold",

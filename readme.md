@@ -106,22 +106,37 @@ To add or replace sample data, drop a `cycode_results_<type>.json` file into `js
 
 ### Quick smoke test — no ADO required
 
-`azure-pipelines-task-lib` reads task inputs from `INPUT_<NAME>` environment variables. Compile the task and run it directly:
+`azure-pipelines-task-lib` reads task inputs from `INPUT_<NAME>` environment variables. Compile the task and run it directly against any local repository:
 
 ```bash
 cd cycodescan
 npm install && npm run build
 
+# Point this at the repo you want to scan — not the plugin directory
+export INPUT_SCANPATH=/path/to/your/repo
+
 export INPUT_CYCODECLIENTID=your-client-id
 export INPUT_CYCODECLIENTSECRET=your-client-secret
-export INPUT_SCANPATH=$(pwd)
-export INPUT_SCANTYPE=sast
+export INPUT_SCANTYPE=all          # all | sast | sca | secret | iac  (comma-separated for a subset)
+export INPUT_SCANMODE=path         # path | commitHistory
 export INPUT_SEVERITYTHRESHOLD=High
 export INPUT_BREAKPIPELINE=false
+export INPUT_VERBOSE=false
 export AGENT_TEMPDIRECTORY=/tmp
-export BUILD_SOURCESDIRECTORY=$(pwd)
 
 node out/index.js
+```
+
+The HTML report is written to `$AGENT_TEMPDIRECTORY/cycode_results.html` (`/tmp/cycode_results.html` above). Open it in a browser to review results. The `##vso[task.addattachment]` and artifact upload lines will print but are harmless outside ADO.
+
+To get working file links in the report, also set these optional variables:
+
+```bash
+export BUILD_REPOSITORY_NAME=my-repo
+export BUILD_SOURCEBRANCHNAME=main
+export BUILD_SOURCEVERSION=$(git -C $INPUT_SCANPATH rev-parse HEAD)
+export SYSTEM_TEAMFOUNDATIONCOLLECTIONURI=https://dev.azure.com/my-org/
+export SYSTEM_TEAMPROJECT=my-project
 ```
 
 The same pattern applies to `cycodeapigate` — set `INPUT_REPONAME`, `INPUT_SEVERITYMIN`, etc.

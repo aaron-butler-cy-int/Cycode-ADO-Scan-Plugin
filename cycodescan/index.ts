@@ -1,6 +1,7 @@
 import * as tl from 'azure-pipelines-task-lib/task';
 import { execSync } from 'child_process';
 import * as fs from 'fs';
+import * as https from 'https';
 import * as path from 'path';
 import sanitizeHtml from 'sanitize-html';
 
@@ -26,6 +27,7 @@ interface DetectionDetails {
     manifest_file_path?: string;
     line?: number | string;
     line_in_file?: number | string;
+    infra_provider?: string;
     cwe?: string[];
     owasp?: string[];
     category?: string;
@@ -56,6 +58,7 @@ interface Detection {
     detection_rule_id?: string;
     detection_details?: DetectionDetails;
     id?: string;
+    _scanType?: string;  // synthetic field — CLI scan type that produced this detection
 }
 
 interface ScanBlock {
@@ -246,6 +249,10 @@ function sanitizeHtmlInput(val: string | number | undefined): string {
         return sanitizeHtml(String(val ?? ''));
 }
 
+function escapeHtmlAttr(s: string): string {
+    return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
 
 function normalizeFilePath(p: string, basePath?: string): string {
     if (!p) return '';
@@ -267,9 +274,11 @@ function normalizeFilePath(p: string, basePath?: string): string {
 }
 
 interface BuildInfo {
-    repo:   string;
-    branch: string;
-    commit: string;
+    repo:    string;
+    branch:  string;
+    commit:  string;
+    org:     string;
+    project: string;
 }
 
 function buildDescBlock(desc: string, rem: string): string {
@@ -332,6 +341,20 @@ function buildPackageInfoHtml(ecosystem: string, pkgDisplay: string, isDirect: b
     return parts.join('') || '<span style="color:var(--muted)">—</span>';
 }
 
+function buildAdoFileUrl(filePath: string, line: number | string | undefined, buildInfo: BuildInfo): string | null {
+    if (!buildInfo.org || !buildInfo.project || !buildInfo.repo || !filePath) return null;
+    const cleanPath = '/' + filePath.replace(/^\//, '');
+    let url = `https://dev.azure.com/${buildInfo.org}/${buildInfo.project}/_git/${buildInfo.repo}?path=${cleanPath}`;
+    if (buildInfo.branch) url += `&version=GB${buildInfo.branch}`;
+    if (line != null && line !== '' && String(line) !== '-1') {
+        const lineNum = Number(line);
+        if (!isNaN(lineNum) && lineNum > 0) {
+            url += `&line=${lineNum}&lineEnd=${lineNum + 1}&lineStartColumn=1&lineEndColumn=1&lineStyle=plain&_a=contents`;
+        }
+    }
+    return url;
+}
+
 function buildDepPathHtml(depPath: string): string {
     const segments = depPath ? depPath.split(/\s*,\s*/).map(s => s.trim()).filter(Boolean) : [];
     return segments.length > 0
@@ -339,7 +362,7 @@ function buildDepPathHtml(depPath: string): string {
         : '<span style="color:var(--muted)">—</span>';
 }
 
-function buildTypeRows(type: string, detections: Detection[], scanPath: string): string {
+function buildTypeRows(type: string, detections: Detection[], scanPath: string, buildInfo: BuildInfo): string {
     return detections.map(d => {
         const sev      = normalizeSeverity(d.severity);
         const color    = SEVERITY_COLORS[sev] ?? '#546e7a';
@@ -348,7 +371,11 @@ function buildTypeRows(type: string, detections: Detection[], scanPath: string):
         const line     = dd.line ?? '';
 
         const sevCell  = `<td><span class="sev" style="background:${color};">${sanitizeHtmlInput(sev)}</span></td>`;
-        const fileCell = `<td><div class="file">${sanitizeHtmlInput(filePath)}</div>` +
+        const fileUrl  = filePath ? buildAdoFileUrl(filePath, line, buildInfo) : null;
+        const fileInner = fileUrl
+            ? `<a href="${escapeHtmlAttr(fileUrl)}" target="_blank">${sanitizeHtmlInput(filePath)}</a>`
+            : sanitizeHtmlInput(filePath);
+        const fileCell = `<td><div class="file">${fileInner}</div>` +
                          `${line ? `<div class="line">Line ${sanitizeHtmlInput(line)}</div>` : ''}</td>`;
 
         switch (type) {
@@ -423,11 +450,16 @@ function buildTypeRows(type: string, detections: Detection[], scanPath: string):
                 const directAttr = isDirect == null ? '' : (isDirect ? 'direct' : 'indirect');
                 const devAttr    = isDev    == null ? '' : (isDev    ? 'yes'    : 'no');
 
+                const manifestUrl = manifestPath ? buildAdoFileUrl(manifestPath, undefined, buildInfo) : null;
+                const manifestCell = manifestPath
+                    ? `<td><div class="file">${manifestUrl ? `<a href="${escapeHtmlAttr(manifestUrl)}" target="_blank">${sanitizeHtmlInput(manifestPath)}</a>` : sanitizeHtmlInput(manifestPath)}</div></td>`
+                    : `<td><span style="color:var(--muted)">—</span></td>`;
+
                 return `<tr data-severity="${sanitizeHtmlInput(sev)}" data-sev-rank="${SEVERITY_ORDER.indexOf(sev)}" data-type="${sanitizeHtmlInput(d.type ?? '')}" data-direct="${directAttr}" data-dev="${devAttr}" data-search="${sanitizeHtmlInput(hs)}">` +
                     sevCell +
                     `<td>${idHtml}</td>` +
                     `<td>${depHtml}</td>` +
-                    `<td><div class="file">${sanitizeHtmlInput(manifestPath) || '<span style="color:var(--muted)">—</span>'}</div></td>` +
+                    manifestCell +
                     `<td>${remParts.join('')}</td>` +
                     `</tr>`;
             }
@@ -510,22 +542,32 @@ function buildTypeRows(type: string, detections: Detection[], scanPath: string):
                     `</tr>`;
             }
             case 'iac': {
-                const vuln  = sanitizeHtmlInput(dd.policy_display_name ?? d.detection_rule_id ?? 'Unknown');
-                const desc  = (dd.description ?? d.message ?? '').trim();
-                const rem   = (dd.remediation_guidelines ?? dd.custom_remediation_guidelines ?? '').trim();
-                const cwe   = Array.isArray(dd.cwe) ? dd.cwe.join('; ') : '';
-                const owasp = Array.isArray(dd.owasp) ? dd.owasp.join('; ') : '';
+                const vuln     = sanitizeHtmlInput(dd.policy_display_name ?? d.detection_rule_id ?? 'Unknown');
+                const desc     = (dd.description ?? d.message ?? '').trim();
+                const rem      = (dd.remediation_guidelines ?? dd.custom_remediation_guidelines ?? '').trim();
+                const cwe      = Array.isArray(dd.cwe) ? dd.cwe.join('; ') : '';
+                const owasp    = Array.isArray(dd.owasp) ? dd.owasp.join('; ') : '';
+                const provider = (dd.infra_provider ?? '').trim();
 
                 const refParts: string[] = [];
-                if (cwe)   refParts.push(`<div><strong>CVE/CWE:</strong> ${sanitizeHtmlInput(cwe)}</div>`);
-                if (owasp) refParts.push(`<div><strong>OWASP:</strong> ${sanitizeHtmlInput(owasp)}</div>`);
+                if (provider) refParts.push(`<div><strong>Provider:</strong> ${sanitizeHtmlInput(provider)}</div>`);
+                if (cwe)      refParts.push(`<div><strong>CVE/CWE:</strong> ${sanitizeHtmlInput(cwe)}</div>`);
+                if (owasp)    refParts.push(`<div><strong>OWASP:</strong> ${sanitizeHtmlInput(owasp)}</div>`);
                 const refHtml = refParts.join('') || '<span style="color:var(--muted)">—</span>';
 
-                const hs = [sev, vuln, filePath, desc, rem, cwe, owasp].join(' ').toLowerCase();
-                return `<tr data-severity="${sanitizeHtmlInput(sev)}" data-sev-rank="${SEVERITY_ORDER.indexOf(sev)}" data-type="${sanitizeHtmlInput(d.type ?? '')}" data-search="${sanitizeHtmlInput(hs)}">` +
+                const iacLineNum = dd.line_in_file;
+                const iacFileUrl = filePath ? buildAdoFileUrl(filePath, iacLineNum, buildInfo) : null;
+                const iacFileInner = iacFileUrl
+                    ? `<a href="${escapeHtmlAttr(iacFileUrl)}" target="_blank">${sanitizeHtmlInput(filePath)}</a>`
+                    : sanitizeHtmlInput(filePath);
+                const iacLineDisplay = iacLineNum != null && iacLineNum !== -1
+                    ? `<div class="line">Line ${sanitizeHtmlInput(iacLineNum)}</div>` : '';
+
+                const hs = [sev, vuln, filePath, desc, rem, cwe, owasp, provider].join(' ').toLowerCase();
+                return `<tr data-severity="${sanitizeHtmlInput(sev)}" data-sev-rank="${SEVERITY_ORDER.indexOf(sev)}" data-type="${sanitizeHtmlInput(d.type ?? '')}" data-provider="${sanitizeHtmlInput(provider)}" data-search="${sanitizeHtmlInput(hs)}">` +
                     sevCell +
                     `<td><strong>${vuln}</strong></td>` +
-                    `<td><div class="file">${sanitizeHtmlInput(filePath)}</div>${dd.line_in_file != null && dd.line_in_file !== -1 ? `<div class="line">Line ${sanitizeHtmlInput(dd.line_in_file)}</div>` : ''}</td>` +
+                    `<td><div class="file">${iacFileInner}</div>${iacLineDisplay}</td>` +
                     `<td>${buildDescBlock(desc, rem)}</td>` +
                     `<td class="meta-col">${refHtml}</td>` +
                     `</tr>`;
@@ -569,19 +611,32 @@ export function generateHtmlReport(
     ].join('\n  ');
 
     // Map Cycode detection type values to display tabs (case-insensitive key lookup)
+    // Primary routing: use the CLI scan type stamped at collection time.
+    // SCA still needs d.type inspection to split vulnerability vs license findings.
+    // TYPE_TO_TAB is kept as a fallback for untagged detections (e.g. future integrations).
+    const SCAN_TO_TAB: Record<string, string> = {
+        sast:   'sast',
+        secret: 'secrets',
+        iac:    'iac',
+    };
     const TYPE_TO_TAB: Record<string, string> = {
-        'sast':                       'sast',
         'vulnerable_code_dependency': 'sca',
         'non permissive license':     'sca_license',
-        'generic-password':           'secrets',
-        'private-key':                'secrets',
-        'file':                       'iac',
+        'non_permissive_license':     'sca_license',
     };
 
     const byTab: Record<string, Detection[]> = {};
     for (const d of detections) {
-        const raw = (d.type ?? '').toLowerCase().trim();
-        const tab = TYPE_TO_TAB[raw] ?? (raw || 'other');
+        let tab: string;
+        if (d._scanType === 'sca') {
+            const raw = (d.type ?? '').toLowerCase().trim();
+            tab = raw.includes('license') ? 'sca_license' : 'sca';
+        } else if (d._scanType && SCAN_TO_TAB[d._scanType]) {
+            tab = SCAN_TO_TAB[d._scanType];
+        } else {
+            const raw = (d.type ?? '').toLowerCase().trim();
+            tab = TYPE_TO_TAB[raw] ?? (raw || 'other');
+        }
         if (!byTab[tab]) byTab[tab] = [];
         byTab[tab].push(d);
     }
@@ -607,7 +662,7 @@ export function generateHtmlReport(
 
     const tabPanels = orderedTypes.map((t, i) => {
         const tabDetections = byTab[t];
-        const rows    = buildTypeRows(t, tabDetections, scanPath);
+        const rows    = buildTypeRows(t, tabDetections, scanPath, buildInfo);
         const headers = getTypeHeaders(t);
 
         const tabCounts: Record<string, number> = {};
@@ -728,6 +783,7 @@ export function generateHtmlReport(
     ${severityOptions}
   </select>
   <select id="type-filter" style="display:none"></select>
+  <select id="provider-filter" style="display:none"></select>
   <select id="direct-filter" style="display:none">
     <option value="">Direct &amp; Indirect</option>
     <option value="direct">Direct only</option>
@@ -750,6 +806,7 @@ ${tabPanels || '<p style="text-align:center;color:var(--muted);padding:40px">No 
   var search=document.getElementById('search');
   var sevFilter=document.getElementById('severity-filter');
   var typeFilter=document.getElementById('type-filter');
+  var providerFilter=document.getElementById('provider-filter');
   var directFilter=document.getElementById('direct-filter');
   var devFilter=document.getElementById('dev-filter');
   var shownCount=document.getElementById('shown-count');
@@ -836,6 +893,25 @@ ${tabPanels || '<p style="text-align:center;color:var(--muted);padding:40px">No 
     }
     typeFilter.value='';
   }
+  function updateIacFilters(panel){
+    if(!providerFilter||!panel)return;
+    var isIac=panel.id==='panel-iac';
+    if(!isIac){providerFilter.style.display='none';providerFilter.value='';return;}
+    var rows=panel.querySelectorAll('tbody tr[data-provider]');
+    var seen={};
+    rows.forEach(function(tr){var p=tr.getAttribute('data-provider')||'';if(p)seen[p]=true;});
+    var providers=Object.keys(seen);
+    if(providers.length>1){
+      var html='<option value="">All providers</option>';
+      providers.forEach(function(p){html+='<option value="'+p+'">'+p+'</option>';});
+      providerFilter.innerHTML=html;
+      providerFilter.style.display='';
+    }else{
+      providerFilter.innerHTML='';
+      providerFilter.style.display='none';
+    }
+    providerFilter.value='';
+  }
   function updateScaFilters(panel){
     var isSca=panel&&(panel.id==='panel-sca'||panel.id==='panel-sca_license');
     if(directFilter)directFilter.style.display=isSca?'':'none';
@@ -847,6 +923,7 @@ ${tabPanels || '<p style="text-align:center;color:var(--muted);padding:40px">No 
     var q=search.value.trim().toLowerCase();
     var sev=sevFilter.value;
     var typ=typeFilter?typeFilter.value:'';
+    var provider=providerFilter?providerFilter.value:'';
     var direct=directFilter?directFilter.value:'';
     var dev=devFilter?devFilter.value:'';
     var rows=getActiveRows();
@@ -856,6 +933,7 @@ ${tabPanels || '<p style="text-align:center;color:var(--muted);padding:40px">No 
         (!q||(tr.getAttribute('data-search')||'').indexOf(q)!==-1)&&
         (!sev||(tr.getAttribute('data-severity')||'')===sev)&&
         (!typ||(tr.getAttribute('data-type')||'')===typ)&&
+        (!provider||(tr.getAttribute('data-provider')||'')===provider)&&
         (!direct||(tr.getAttribute('data-direct')||'')===direct)&&
         (!dev||(tr.getAttribute('data-dev')||'')===dev);
       tr.classList.toggle('hidden',!match);
@@ -872,6 +950,7 @@ ${tabPanels || '<p style="text-align:center;color:var(--muted);padding:40px">No 
       if(panel)panel.classList.add('active');
       renderTabSummary(panel);
       updateTypeFilter(panel);
+      updateIacFilters(panel);
       updateScaFilters(panel);
       search.value='';
       sevFilter.value='';
@@ -881,15 +960,143 @@ ${tabPanels || '<p style="text-align:center;color:var(--muted);padding:40px">No 
   search.addEventListener('input',applyFilters);
   sevFilter.addEventListener('change',applyFilters);
   if(typeFilter)typeFilter.addEventListener('change',applyFilters);
+  if(providerFilter)providerFilter.addEventListener('change',applyFilters);
   if(directFilter)directFilter.addEventListener('change',applyFilters);
   if(devFilter)devFilter.addEventListener('change',applyFilters);
   updateTypeFilter(document.querySelector('.tab-panel.active'));
+  updateIacFilters(document.querySelector('.tab-panel.active'));
   updateScaFilters(document.querySelector('.tab-panel.active'));
   applyFilters();
 })();
 </script>
 </body>
 </html>`;
+}
+
+// ---------------------------------------------------------------------------
+// Commit-history scan helpers
+// ---------------------------------------------------------------------------
+
+function httpsGet(url: string, token: string): Promise<string> {
+    return new Promise((resolve, reject) => {
+        const req = https.get(url, { headers: { Authorization: `Bearer ${token}` } }, res => {
+            let body = '';
+            res.on('data', (chunk: string) => body += chunk);
+            res.on('end', () => resolve(body));
+        });
+        req.on('error', reject);
+    });
+}
+
+interface AdoBuild { sourceVersion?: string; finishTime?: string; }
+
+function getParentBranchCandidates(): string[] {
+    // PR builds set the target branch explicitly — most reliable source
+    const prTarget = (tl.getVariable('System.PullRequest.TargetBranch') ?? '').replace('refs/heads/', '');
+    if (prTarget) return [prTarget];
+    // For pushes to feature branches, try common integration branch names
+    return ['main', 'master', 'develop', 'dev'];
+}
+
+async function queryAdoBuilds(
+    base: string, projectId: string, definitionId: string, token: string, branchRef: string
+): Promise<AdoBuild[]> {
+    const branchParam = branchRef ? `&branchName=${encodeURIComponent(branchRef)}` : '';
+    const url = `${base}/${projectId}/_apis/build/builds?definitions=${definitionId}&resultFilter=succeeded${branchParam}&$top=10&api-version=7.1`;
+    const body = await httpsGet(url, token);
+    return (JSON.parse(body)?.value ?? []) as AdoBuild[];
+}
+
+async function getPreviousSha(repoPath: string, currentSha: string, sourceBranch: string): Promise<string | null> {
+    // Strategy 1: git rev-parse HEAD~1
+    try {
+        const sha = execSync('git rev-parse HEAD~1', {
+            cwd: repoPath, shell: SHELL, encoding: 'utf8', stdio: 'pipe',
+        }).trim();
+        if (/^[0-9a-f]{40}$/i.test(sha) && sha !== currentSha) {
+            console.log(`Previous SHA from git: ${sha.slice(0, 7)}`);
+            return sha;
+        }
+    } catch {
+        console.log('git rev-parse HEAD~1 failed — falling back to ADO REST API');
+    }
+
+    const collectionUri = tl.getVariable('System.TeamFoundationCollectionUri') ?? '';
+    const projectId     = tl.getVariable('System.TeamProjectId') ?? '';
+    const definitionId  = tl.getVariable('System.DefinitionId') ?? '';
+    const token         = tl.getVariable('System.AccessToken') ?? '';
+    const adoBase       = collectionUri.replace(/\/$/, '');
+    const adoAvailable  = !!(collectionUri && projectId && definitionId && token);
+
+    // Strategy 2: ADO REST API — same branch, different SHA
+    if (adoAvailable) {
+        try {
+            console.log(`Fetching recent successful builds from ADO REST API (branch: ${sourceBranch || 'any'})...`);
+            const builds = await queryAdoBuilds(adoBase, projectId, definitionId, token, sourceBranch);
+            for (const build of builds) {
+                const sha = build.sourceVersion ?? '';
+                if (/^[0-9a-f]{40}$/i.test(sha) && sha !== currentSha) {
+                    console.log(`Previous SHA from ADO REST API (same branch): ${sha.slice(0, 7)}`);
+                    return sha;
+                }
+            }
+            console.log('No previous build with a different SHA found on this branch — trying parent branch...');
+        } catch (err: any) {
+            console.log(`ADO REST API (same branch) failed: ${err.message}`);
+        }
+    } else {
+        console.log('ADO REST API skipped — System.* variables not available');
+    }
+
+    // Strategy 3: Parent branch fallback
+    const parentCandidates = getParentBranchCandidates();
+
+    // 3a: git merge-base — gives the exact fork point, inherently excludes any post-fork commits
+    for (const branch of parentCandidates) {
+        try {
+            const sha = execSync(`git merge-base HEAD origin/${branch}`, {
+                cwd: repoPath, shell: SHELL, encoding: 'utf8', stdio: 'pipe',
+            }).trim();
+            if (/^[0-9a-f]{40}$/i.test(sha) && sha !== currentSha) {
+                console.log(`Fork point with origin/${branch}: ${sha.slice(0, 7)}`);
+                return sha;
+            }
+        } catch { /* branch not present in shallow clone, try next candidate */ }
+    }
+
+    // 3b: ADO REST API — last successful build on parent branch, filtered to builds that
+    //     finished before the current build started (excludes post-fork builds)
+    if (adoAvailable) {
+        let cutoff: Date | null = null;
+        try {
+            const buildId = tl.getVariable('Build.BuildId') ?? '';
+            if (buildId) {
+                const buildBody = await httpsGet(`${adoBase}/${projectId}/_apis/build/builds/${buildId}?api-version=7.1`, token);
+                const buildJson = JSON.parse(buildBody);
+                const t = buildJson?.startTime ?? buildJson?.queueTime ?? '';
+                if (t) cutoff = new Date(t);
+            }
+        } catch { /* proceed without time filtering */ }
+
+        for (const branch of parentCandidates) {
+            try {
+                const fullRef = `refs/heads/${branch}`;
+                console.log(`Trying parent branch ${branch} via ADO REST API...`);
+                const builds = await queryAdoBuilds(adoBase, projectId, definitionId, token, fullRef);
+                for (const build of builds) {
+                    const sha = build.sourceVersion ?? '';
+                    if (!/^[0-9a-f]{40}$/i.test(sha) || sha === currentSha) continue;
+                    if (cutoff && build.finishTime && new Date(build.finishTime) > cutoff) continue;
+                    console.log(`Previous SHA from parent branch ${branch}: ${sha.slice(0, 7)}`);
+                    return sha;
+                }
+            } catch (err: any) {
+                console.log(`Parent branch ${branch} ADO API failed: ${err.message}`);
+            }
+        }
+    }
+
+    return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -912,6 +1119,7 @@ async function run(): Promise<void> {
         const statusOut = (() => { try { return execSync(`${cycodeExe} status`, { shell: SHELL, encoding: 'utf8' }).trim(); } catch { return 'unknown'; } })();
         console.log(`Cycode CLI status: ${statusOut}`);
 
+        const scanMode     = tl.getInput('scanMode') || 'path';
         const scanTypes    = parseScanTypes(tl.getInput('scanType') || 'all');
         const verboseFlag  = verbose ? ' -v' : '';
         const extraStr     = extraFlags ? ` ${extraFlags}` : '';
@@ -924,13 +1132,40 @@ async function run(): Promise<void> {
 
         const tempDir = tl.getVariable('Agent.TempDirectory') ?? __dirname;
 
+        const repo   = tl.getVariable('Build.Repository.Name') ?? '';
+        const branch = tl.getVariable('Build.SourceBranchName') ?? '';
+        const commit = tl.getVariable('Build.SourceVersion') ?? '';
+        console.log(`Repository: ${repo || '(unknown)'}`);
+        console.log(`Branch:     ${branch || '(unknown)'}`);
+        console.log(`Commit:     ${commit ? commit.slice(0, 7) : '(unknown)'}`);
+        console.log(`Scan path:  ${scanPath}`);
+        console.log(`Scan type:  ${scanTypes.join(', ')}`);
+
+        // Resolve commit range once before the scan loop
+        let commitRange: string | null = null;
+        if (scanMode === 'commitHistory') {
+            const currentSha  = tl.getVariable('Build.SourceVersion') ?? '';
+            const sourceBranch = tl.getVariable('Build.SourceBranch') ?? '';
+            const prevSha    = await getPreviousSha(scanPath, currentSha, sourceBranch);
+            if (!prevSha) {
+                throw new Error(
+                    'Commit history scan requires a previous SHA but none could be resolved. ' +
+                    'Ensure the pipeline has access to git history (no shallow clone) or that ' +
+                    '"Allow scripts to access OAuth token" is enabled for the REST API fallback.'
+                );
+            }
+            commitRange = `${prevSha}..${currentSha}`;
+            console.log(`Commit range: ${commitRange}`);
+        }
+
         const allDetections: Detection[] = [];
         const failedTypes: string[] = [];
 
         for (const type of scanTypes) {
             console.log(`\nStarting ${type} scan...`);
-            // --no-progress-meter --no-update-notifier
-            const scanCmd = `${cycodeExe}${verboseFlag} -o json scan --soft-fail -t ${type}${extraStr} path ${quotedPath}`;
+            const scanCmd = commitRange
+                ? `${cycodeExe}${verboseFlag} -o json scan --soft-fail -t ${type}${extraStr} commit-history -r ${commitRange} ${quotedPath}`
+                : `${cycodeExe}${verboseFlag} -o json scan --soft-fail -t ${type}${extraStr} path ${quotedPath}`;
             console.log(`Running: ${scanCmd}`);
 
             let rawData: ScanOutput | Detection[];
@@ -951,7 +1186,7 @@ async function run(): Promise<void> {
             fs.writeFileSync(jsonFile, JSON.stringify(rawData, null, 2));
             tl.uploadArtifact('Cycode', jsonFile, 'Cycode Scan Results');
 
-            const typeDetections = extractDetections(rawData);
+            const typeDetections = extractDetections(rawData).map(d => ({ ...d, _scanType: type }));
             console.log(`${type} scan complete — findings: ${typeDetections.length}`);
             allDetections.push(...typeDetections);
         }
@@ -974,10 +1209,14 @@ async function run(): Promise<void> {
 
         // Write combined HTML report and attach to build results tab
         const reportFile = path.join(tempDir, 'cycode_results.html');
+        const collectionUri = tl.getVariable('System.TeamFoundationCollectionUri') ?? '';
+        const orgMatch = collectionUri.match(/dev\.azure\.com\/([^/]+)/);
         const buildInfo: BuildInfo = {
-            repo:   tl.getVariable('Build.Repository.Name') ?? '',
-            branch: tl.getVariable('Build.SourceBranchName') ?? '',
-            commit: tl.getVariable('Build.SourceVersion') ?? '',
+            repo:    tl.getVariable('Build.Repository.Name') ?? '',
+            branch:  tl.getVariable('Build.SourceBranchName') ?? '',
+            commit:  tl.getVariable('Build.SourceVersion') ?? '',
+            org:     orgMatch?.[1] ?? '',
+            project: tl.getVariable('System.TeamProject') ?? '',
         };
         fs.writeFileSync(reportFile, generateHtmlReport(allDetections, scanPath, scanTypes.join(', '), buildInfo));
         console.log(`##vso[task.addattachment type=cycode.scan.result;name=content;]${reportFile}`);
