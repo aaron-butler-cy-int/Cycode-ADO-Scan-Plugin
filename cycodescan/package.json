@@ -3,7 +3,8 @@
     "version": "0.2.15",
     "main": "out/index.js",
     "scripts": {
-        "build": "tsc -p tsconfig.json"
+        "build": "tsc -p tsconfig.json",
+        "test-report": "tsc -p tsconfig.json && node out/test-report.js"
     },
     "dependencies": {
         "azure-pipelines-task-lib": "^5.0.0",

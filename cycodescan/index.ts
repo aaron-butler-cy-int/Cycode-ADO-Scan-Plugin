@@ -25,6 +25,7 @@ interface DetectionDetails {
     file_name?: string;
     manifest_file_path?: string;
     line?: number | string;
+    line_in_file?: number | string;
     cwe?: string[];
     owasp?: string[];
     category?: string;
@@ -36,7 +37,16 @@ interface DetectionDetails {
     detection_rule_id?: string;
     policy_id?: string;
     alert?: ScaAlert;
-    package_ecosystem?: string;
+    build_tool?: string;
+    ecosystem?: string;
+    package_name?: string;
+    package_version?: string;
+    dependency_paths?: string;
+    license?: string;
+    cvss_score?: number;
+    epss?: number;
+    is_direct_dependency?: boolean;
+    is_dev_dependency?: boolean;
 }
 
 interface Detection {
@@ -218,7 +228,7 @@ function runScan(cmd: string, env: Record<string, string>): string {
     }
 }
 
-function extractDetections(data: ScanOutput | Detection[]): Detection[] {
+export function extractDetections(data: ScanOutput | Detection[]): Detection[] {
     if (Array.isArray(data)) return data;
     const out: Detection[] = [];
     for (const block of data.scan_results ?? []) {
@@ -283,22 +293,22 @@ function getTypeHeaders(type: string): string {
                 `<th data-col-idx="4" class="sortable" style="width:200px">CWE / Language${si}</th>`;
         case 'sca':
             return `<th data-col-idx="0" class="sortable" style="width:110px">Severity${si}</th>` +
-                `<th data-col-idx="1" class="sortable" style="width:240px">Package / CVE / GHSA${si}</th>` + // Updated text & width
-                `<th data-col-idx="2" class="sortable">Dependency Path${si}</th>` +
+                `<th data-col-idx="1" class="sortable" style="width:250px">Package Info${si}</th>` +
+                `<th data-col-idx="2" class="sortable" style="width:650px">Dependency Path${si}</th>` +
                 `<th data-col-idx="3" class="sortable" style="width:220px">Manifest File${si}</th>` +
                 `<th data-col-idx="4" class="sortable">Remediation${si}</th>`;
         case 'sca_license':
             return `<th data-col-idx="0" class="sortable" style="width:110px">Severity${si}</th>` +
-                `<th data-col-idx="1" class="sortable" style="width:200px">License Type${si}</th>` +
-                `<th data-col-idx="2" class="sortable" style="width:240px">Package File${si}</th>` +
-                `<th data-col-idx="3" class="sortable">Description${si}</th>` +
-                `<th data-col-idx="4" class="sortable" style="width:200px">Remediation${si}</th>`;
+                `<th data-col-idx="1" class="sortable" style="width:300px">Package Info${si}</th>` +
+                `<th data-col-idx="2" class="sortable" style="width:200px">License Type${si}</th>` +
+                `<th data-col-idx="3" class="sortable" style="width:650px">Dependency Path${si}</th>` +
+                `<th data-col-idx="4" class="sortable">Description${si}</th>`;
         case 'secrets':
             return `<th data-col-idx="0" class="sortable" style="width:110px">Severity${si}</th>` +
                 `<th data-col-idx="1" class="sortable" style="width:200px">Secret Type${si}</th>` +
                 `<th data-col-idx="2" class="sortable" style="width:280px">File &amp; Line${si}</th>` +
                 `<th data-col-idx="3" class="sortable">Description${si}</th>`;
-        case 'container':
+        case 'iac':
             return `<th data-col-idx="0" class="sortable" style="width:110px">Severity${si}</th>` +
                 `<th data-col-idx="1" class="sortable">Rule / CVE${si}</th>` +
                 `<th data-col-idx="2" class="sortable" style="width:240px">File${si}</th>` +
@@ -311,6 +321,22 @@ function getTypeHeaders(type: string): string {
                 `<th data-col-idx="3" class="sortable">File &amp; Line${si}</th>` +
                 `<th data-col-idx="4" class="sortable">Details${si}</th>`;
     }
+}
+
+function buildPackageInfoHtml(ecosystem: string, pkgDisplay: string, isDirect: boolean | undefined, isDev: boolean | undefined): string {
+    const parts: string[] = [];
+    parts.push(`<div><strong>Build Tool:</strong> ${sanitizeHtmlInput(ecosystem)}</div>`);
+    parts.push(`<div><strong>Package:</strong> ${sanitizeHtmlInput(pkgDisplay)}</div>`);
+    if (isDirect != null) parts.push(`<div><strong>Direct:</strong> ${isDirect ? 'Yes' : 'No'}</div>`);
+    if (isDev    != null) parts.push(`<div><strong>Dev:</strong> ${isDev    ? 'Yes' : 'No'}</div>`);
+    return parts.join('') || '<span style="color:var(--muted)">—</span>';
+}
+
+function buildDepPathHtml(depPath: string): string {
+    const segments = depPath ? depPath.split(/\s*,\s*/).map(s => s.trim()).filter(Boolean) : [];
+    return segments.length > 0
+        ? segments.map(s => `<div style="font-size:12px;margin-bottom:2px">&#8226; ${sanitizeHtmlInput(s)}</div>`).join('')
+        : '<span style="color:var(--muted)">—</span>';
 }
 
 function buildTypeRows(type: string, detections: Detection[], scanPath: string): string {
@@ -362,73 +388,120 @@ function buildTypeRows(type: string, detections: Detection[], scanPath: string):
                 const pkgName = alert.affected_package_name ?? '';
                 const pkgVer = alert.vulnerable_requirements ?? '';
                 const pkgDisplay = pkgName ? `${pkgName}@${pkgVer}` : 'Unknown';
-                const ecosystem = dd.package_ecosystem ?? 'Unknown'; // 
+                const ecosystem = dd.build_tool ?? 'Unknown'; // 
 
-                // Build the Package / CVE / GHSA column content
-                const idParts: string[] = [];
-                idParts.push(`<div><strong>Ecosystem:</strong> ${sanitizeHtmlInput(ecosystem)}</div>`); 
-                idParts.push(`<div><strong>Package:</strong> ${sanitizeHtmlInput(pkgDisplay)}</div>`);
-                if (cve) idParts.push(`<div><strong>CVE:</strong> ${sanitizeHtmlInput(cve)}</div>`);
-                if (ghsa) idParts.push(`<div><strong>GHSA:</strong> ${sanitizeHtmlInput(ghsa)}</div>`);
+                const cvss = dd.cvss_score != null ? dd.cvss_score.toFixed(1) : null;
+                const epss = dd.epss != null ? (dd.epss * 100).toFixed(2) + '%' : null;
+                const isDirect = dd.is_direct_dependency;
+                const isDev    = dd.is_dev_dependency;
 
-                const descShort = desc.length > 200 ? desc.slice(0, 200) + '…' : desc;
-                if (descShort) idParts.push(`<div style="margin-top:4px;color:var(--muted);font-size:12px">${sanitizeHtmlInput(descShort)}</div>`);
-                if (desc.length > 200) idParts.push(`<details><summary>Full description</summary><div class="content">${sanitizeHtmlInput(desc)}</div></details>`);
-                const idHtml = idParts.join('') || '<span style="color:var(--muted)">—</span>';
+                // Build the Package Info column content — shared helper + SCA-specific CVE/GHSA/CVSS/EPSS
+                const basePkgHtml = buildPackageInfoHtml(ecosystem, pkgDisplay, isDirect, isDev);
+                const scaExtras: string[] = [];
+                if (cve)  scaExtras.push(`<div><strong>CVE:</strong> ${sanitizeHtmlInput(cve)}</div>`);
+                if (ghsa) scaExtras.push(`<div><strong>GHSA:</strong> ${sanitizeHtmlInput(ghsa)}</div>`);
+                if (cvss) scaExtras.push(`<div><strong>CVSS:</strong> ${sanitizeHtmlInput(cvss)}</div>`);
+                if (epss) scaExtras.push(`<div><strong>EPSS:</strong> ${sanitizeHtmlInput(epss)}</div>`);
+                const idHtml = basePkgHtml + scaExtras.join('');
 
-                const depSegments = depPath ? depPath.split(/\s*,\s*/).map(s => s.trim()).filter(Boolean) : [];
-                const depHtml = depSegments.length > 0
-                    ? depSegments.map(s => `<div style="font-size:12px; margin-bottom:2px;">${sanitizeHtmlInput(s)}</div>`).join('')
-                    : '<span style="color:var(--muted)">—</span>';
+                const depHtml = buildDepPathHtml(depPath);
 
+                // Remediation column: description first, then remediation guidelines
+                const remParts: string[] = [];
+                if (desc) {
+                    const descShort = desc.length > 200 ? desc.slice(0, 200) + '…' : desc;
+                    remParts.push(`<div style="margin-bottom:6px;color:var(--muted);font-size:12px">${sanitizeHtmlInput(descShort)}</div>`);
+                    if (desc.length > 200) remParts.push(`<details><summary>Full description</summary><div class="content">${sanitizeHtmlInput(desc)}</div></details>`);
+                }
                 const remShort = rem.length > 180 ? rem.slice(0, 180) + '…' : rem;
-                const remParts: string[] = [`<div>${remShort ? sanitizeHtmlInput(remShort) : '<span style="color:var(--muted)">—</span>'}</div>`];
+                remParts.push(`<div>${remShort ? sanitizeHtmlInput(remShort) : (desc ? '' : '<span style="color:var(--muted)">—</span>')}</div>`);
                 if (rem.length > 180) remParts.push(`<details><summary>Full guidance</summary><div class="content">${sanitizeHtmlInput(rem)}</div></details>`);
 
-                const hs = [sev, ecosystem, pkgName, pkgVer, cve, ghsa, desc, depPath, manifestPath, rem].join(' ').toLowerCase();
+                const hs = [sev, ecosystem, pkgName, pkgVer, cve, ghsa, desc, depPath, manifestPath, rem, cvss, epss].join(' ').toLowerCase();
 
 
-                return `<tr data-severity="${sanitizeHtmlInput(sev)}" data-sev-rank="${SEVERITY_ORDER.indexOf(sev)}" data-type="${sanitizeHtmlInput(d.type ?? '')}" data-search="${sanitizeHtmlInput(hs)}">` +
+                const directAttr = isDirect == null ? '' : (isDirect ? 'direct' : 'indirect');
+                const devAttr    = isDev    == null ? '' : (isDev    ? 'yes'    : 'no');
+
+                return `<tr data-severity="${sanitizeHtmlInput(sev)}" data-sev-rank="${SEVERITY_ORDER.indexOf(sev)}" data-type="${sanitizeHtmlInput(d.type ?? '')}" data-direct="${directAttr}" data-dev="${devAttr}" data-search="${sanitizeHtmlInput(hs)}">` +
                     sevCell +
                     `<td>${idHtml}</td>` +
-                    `<td>${depHtml}</td>` + // ✅ Changed from depParts.join('')
+                    `<td>${depHtml}</td>` +
                     `<td><div class="file">${sanitizeHtmlInput(manifestPath) || '<span style="color:var(--muted)">—</span>'}</div></td>` +
                     `<td>${remParts.join('')}</td>` +
                     `</tr>`;
             }
             case 'sca_license': {
-                const license = sanitizeHtmlInput(dd.policy_display_name ?? d.detection_rule_id ?? 'Unknown');
-                const desc    = (dd.description ?? d.message ?? '').trim();
-                const rem     = (dd.remediation_guidelines ?? dd.custom_remediation_guidelines ?? '').trim();
+                const licenseVal  = (dd.license ?? '').trim();
+                const licenseDisplay = licenseVal
+                    ? licenseVal.split(',').map(l => `<span style="background:#e8f5e9;color:#2e7d32;border-radius:4px;padding:1px 6px;margin-right:4px;font-size:12px">${sanitizeHtmlInput(l.trim())}</span>`).join('')
+                    : sanitizeHtmlInput(dd.policy_display_name ?? d.detection_rule_id ?? 'Unknown');
 
-                const descShort = desc.length > 180 ? desc.slice(0, 180) + '…' : desc;
-                const descParts: string[] = [`<div>${sanitizeHtmlInput(descShort) || '<span style="color:var(--muted)">—</span>'}</div>`];
-                if (desc.length > 180)
-                    descParts.push(`<details><summary>Full description</summary><div class="content">${sanitizeHtmlInput(desc)}</div></details>`);
+                const pkgName    = dd.package_name ?? '';
+                const pkgVer     = dd.package_version ?? '';
+                const pkgDisplay = pkgName ? `${pkgName}@${pkgVer}` : 'Unknown';
+                const ecosystem  = dd.build_tool ?? dd.ecosystem ?? 'Unknown';
+                const isDirect   = dd.is_direct_dependency;
+                const isDev      = dd.is_dev_dependency;
+                const depPath    = (dd.dependency_paths ?? '').trim();
+                const manifestPath = normalizeFilePath(dd.manifest_file_path ?? dd.file_name ?? '', scanPath);
 
-                const remShort = rem.length > 120 ? rem.slice(0, 120) + '…' : rem;
-                const remParts: string[] = [`<div>${remShort ? sanitizeHtmlInput(remShort) : '<span style="color:var(--muted)">—</span>'}</div>`];
-                if (rem.length > 120)
-                    remParts.push(`<details><summary>Full guidance</summary><div class="content">${sanitizeHtmlInput(rem)}</div></details>`);
+                const idHtml  = buildPackageInfoHtml(ecosystem, pkgDisplay, isDirect, isDev);
+                const depHtml = buildDepPathHtml(depPath);
 
-                const hs = [sev, license, filePath, desc, rem].join(' ').toLowerCase();
-                return `<tr data-severity="${sanitizeHtmlInput(sev)}" data-sev-rank="${SEVERITY_ORDER.indexOf(sev)}" data-type="${sanitizeHtmlInput(d.type ?? '')}" data-search="${sanitizeHtmlInput(hs)}">` +
+                // Description column: message, then remediation guidelines
+                const msg  = (d.message ?? '').trim();
+                const rem  = (dd.remediation_guidelines ?? dd.custom_remediation_guidelines ?? '').trim();
+                const descParts: string[] = [];
+                if (msg) {
+                    const msgShort = msg.length > 180 ? msg.slice(0, 180) + '…' : msg;
+                    descParts.push(`<div style="margin-bottom:4px">${sanitizeHtmlInput(msgShort)}</div>`);
+                    if (msg.length > 180) descParts.push(`<details><summary>Full message</summary><div class="content">${sanitizeHtmlInput(msg)}</div></details>`);
+                }
+                if (rem) {
+                    const remShort = rem.length > 180 ? rem.slice(0, 180) + '…' : rem;
+                    descParts.push(`<div style="color:var(--muted);font-size:12px">${sanitizeHtmlInput(remShort)}</div>`);
+                    if (rem.length > 180) descParts.push(`<details><summary>Full guidance</summary><div class="content">${sanitizeHtmlInput(rem)}</div></details>`);
+                }
+                if (!descParts.length) descParts.push('<span style="color:var(--muted)">—</span>');
+
+                const directAttr = isDirect == null ? '' : (isDirect ? 'direct' : 'indirect');
+                const devAttr    = isDev    == null ? '' : (isDev    ? 'yes'    : 'no');
+
+                const hs = [sev, licenseVal, pkgName, pkgVer, ecosystem, msg, rem, depPath, manifestPath].join(' ').toLowerCase();
+                return `<tr data-severity="${sanitizeHtmlInput(sev)}" data-sev-rank="${SEVERITY_ORDER.indexOf(sev)}" data-type="${sanitizeHtmlInput(d.type ?? '')}" data-direct="${directAttr}" data-dev="${devAttr}" data-search="${sanitizeHtmlInput(hs)}">` +
                     sevCell +
-                    `<td><strong>${license}</strong></td>` +
-                    `<td><div class="file">${sanitizeHtmlInput(filePath)}</div></td>` +
+                    `<td>${idHtml}</td>` +
+                    `<td>${licenseDisplay}</td>` +
+                    `<td>${depHtml}</td>` +
                     `<td>${descParts.join('')}</td>` +
-                    `<td class="meta-col">${remParts.join('')}</td>` +
                     `</tr>`;
             }
             case 'secrets': {
                 const secretType = sanitizeHtmlInput(dd.policy_display_name ?? d.detection_rule_id ?? 'Unknown');
-                const desc       = (dd.description ?? d.message ?? '').trim();
-                const short      = desc.length > 180 ? desc.slice(0, 180) + '…' : desc;
-                const descParts: string[] = [`<div>${sanitizeHtmlInput(short)}</div>`];
-                if (desc.length > 180)
-                    descParts.push(`<details><summary>Full description</summary><div class="content">${sanitizeHtmlInput(desc)}</div></details>`);
+                const msg  = (d.message ?? '').trim();
+                const desc = (dd.description ?? '').trim();
+                const rem  = (dd.remediation_guidelines ?? dd.custom_remediation_guidelines ?? '').trim();
 
-                const hs = [sev, secretType, desc, filePath, String(line)].join(' ').toLowerCase();
+                const descParts: string[] = [];
+                if (msg) {
+                    const msgShort = msg.length > 200 ? msg.slice(0, 200) + '…' : msg;
+                    descParts.push(`<div style="margin-bottom:4px">${sanitizeHtmlInput(msgShort)}</div>`);
+                    if (msg.length > 200) descParts.push(`<details><summary>Full message</summary><div class="content">${sanitizeHtmlInput(msg)}</div></details>`);
+                }
+                if (desc) {
+                    const descShort = desc.length > 180 ? desc.slice(0, 180) + '…' : desc;
+                    descParts.push(`<div style="margin-bottom:4px;color:var(--muted);font-size:12px">${sanitizeHtmlInput(descShort)}</div>`);
+                    if (desc.length > 180) descParts.push(`<details><summary>Full description</summary><div class="content">${sanitizeHtmlInput(desc)}</div></details>`);
+                }
+                if (rem) {
+                    const remShort = rem.length > 180 ? rem.slice(0, 180) + '…' : rem;
+                    descParts.push(`<div style="color:var(--muted);font-size:12px">${sanitizeHtmlInput(remShort)}</div>`);
+                    if (rem.length > 180) descParts.push(`<details><summary>Full guidance</summary><div class="content">${sanitizeHtmlInput(rem)}</div></details>`);
+                }
+                if (!descParts.length) descParts.push('<span style="color:var(--muted)">—</span>');
+
+                const hs = [sev, secretType, msg, desc, rem, filePath, String(line)].join(' ').toLowerCase();
                 return `<tr data-severity="${sanitizeHtmlInput(sev)}" data-sev-rank="${SEVERITY_ORDER.indexOf(sev)}" data-type="${sanitizeHtmlInput(d.type ?? '')}" data-search="${sanitizeHtmlInput(hs)}">` +
                     sevCell +
                     `<td><strong>${secretType}</strong></td>` +
@@ -436,7 +509,7 @@ function buildTypeRows(type: string, detections: Detection[], scanPath: string):
                     `<td>${descParts.join('')}</td>` +
                     `</tr>`;
             }
-            case 'container': {
+            case 'iac': {
                 const vuln  = sanitizeHtmlInput(dd.policy_display_name ?? d.detection_rule_id ?? 'Unknown');
                 const desc  = (dd.description ?? d.message ?? '').trim();
                 const rem   = (dd.remediation_guidelines ?? dd.custom_remediation_guidelines ?? '').trim();
@@ -452,7 +525,7 @@ function buildTypeRows(type: string, detections: Detection[], scanPath: string):
                 return `<tr data-severity="${sanitizeHtmlInput(sev)}" data-sev-rank="${SEVERITY_ORDER.indexOf(sev)}" data-type="${sanitizeHtmlInput(d.type ?? '')}" data-search="${sanitizeHtmlInput(hs)}">` +
                     sevCell +
                     `<td><strong>${vuln}</strong></td>` +
-                    `<td><div class="file">${sanitizeHtmlInput(filePath)}</div>${line ? `<div class="line">Line ${sanitizeHtmlInput(line)}</div>` : ''}</td>` +
+                    `<td><div class="file">${sanitizeHtmlInput(filePath)}</div>${dd.line_in_file != null && dd.line_in_file !== -1 ? `<div class="line">Line ${sanitizeHtmlInput(dd.line_in_file)}</div>` : ''}</td>` +
                     `<td>${buildDescBlock(desc, rem)}</td>` +
                     `<td class="meta-col">${refHtml}</td>` +
                     `</tr>`;
@@ -474,7 +547,7 @@ function buildTypeRows(type: string, detections: Detection[], scanPath: string):
     }).join('\n    ');
 }
 
-function generateHtmlReport(
+export function generateHtmlReport(
     detections: Detection[],
     scanPath: string,
     scanType: string,
@@ -502,7 +575,7 @@ function generateHtmlReport(
         'non permissive license':     'sca_license',
         'generic-password':           'secrets',
         'private-key':                'secrets',
-        'file':                       'container',
+        'file':                       'iac',
     };
 
     const byTab: Record<string, Detection[]> = {};
@@ -518,9 +591,9 @@ function generateHtmlReport(
         sca:         'SCA',
         sca_license: 'SCA License',
         secrets:     'Secrets',
-        container:   'Container',
+        iac:         'IaC',
     };
-    const TAB_ORDER = ['sast', 'sca', 'sca_license', 'secrets', 'container'];
+    const TAB_ORDER = ['sast', 'sca', 'sca_license', 'secrets', 'iac'];
     const orderedTypes = [
         ...TAB_ORDER.filter(t => byTab[t]?.length),
         ...Object.keys(byTab).filter(t => !TAB_ORDER.includes(t) && byTab[t]?.length),
@@ -655,6 +728,16 @@ function generateHtmlReport(
     ${severityOptions}
   </select>
   <select id="type-filter" style="display:none"></select>
+  <select id="direct-filter" style="display:none">
+    <option value="">Direct &amp; Indirect</option>
+    <option value="direct">Direct only</option>
+    <option value="indirect">Indirect only</option>
+  </select>
+  <select id="dev-filter" style="display:none">
+    <option value="">All (incl. dev)</option>
+    <option value="no">Non-dev only</option>
+    <option value="yes">Dev only</option>
+  </select>
   <span id="shown-count" style="color:var(--muted);font-size:12px"></span>
 </div>
 
@@ -667,6 +750,8 @@ ${tabPanels || '<p style="text-align:center;color:var(--muted);padding:40px">No 
   var search=document.getElementById('search');
   var sevFilter=document.getElementById('severity-filter');
   var typeFilter=document.getElementById('type-filter');
+  var directFilter=document.getElementById('direct-filter');
+  var devFilter=document.getElementById('dev-filter');
   var shownCount=document.getElementById('shown-count');
 
   function initSort(panel){
@@ -751,17 +836,28 @@ ${tabPanels || '<p style="text-align:center;color:var(--muted);padding:40px">No 
     }
     typeFilter.value='';
   }
+  function updateScaFilters(panel){
+    var isSca=panel&&(panel.id==='panel-sca'||panel.id==='panel-sca_license');
+    if(directFilter)directFilter.style.display=isSca?'':'none';
+    if(devFilter)devFilter.style.display=isSca?'':'none';
+    if(directFilter)directFilter.value='';
+    if(devFilter)devFilter.value='';
+  }
   function applyFilters(){
     var q=search.value.trim().toLowerCase();
     var sev=sevFilter.value;
     var typ=typeFilter?typeFilter.value:'';
+    var direct=directFilter?directFilter.value:'';
+    var dev=devFilter?devFilter.value:'';
     var rows=getActiveRows();
     var shown=0;
     rows.forEach(function(tr){
       var match=
         (!q||(tr.getAttribute('data-search')||'').indexOf(q)!==-1)&&
         (!sev||(tr.getAttribute('data-severity')||'')===sev)&&
-        (!typ||(tr.getAttribute('data-type')||'')===typ);
+        (!typ||(tr.getAttribute('data-type')||'')===typ)&&
+        (!direct||(tr.getAttribute('data-direct')||'')===direct)&&
+        (!dev||(tr.getAttribute('data-dev')||'')===dev);
       tr.classList.toggle('hidden',!match);
       if(match)shown++;
     });
@@ -776,6 +872,7 @@ ${tabPanels || '<p style="text-align:center;color:var(--muted);padding:40px">No 
       if(panel)panel.classList.add('active');
       renderTabSummary(panel);
       updateTypeFilter(panel);
+      updateScaFilters(panel);
       search.value='';
       sevFilter.value='';
       applyFilters();
@@ -784,7 +881,10 @@ ${tabPanels || '<p style="text-align:center;color:var(--muted);padding:40px">No 
   search.addEventListener('input',applyFilters);
   sevFilter.addEventListener('change',applyFilters);
   if(typeFilter)typeFilter.addEventListener('change',applyFilters);
+  if(directFilter)directFilter.addEventListener('change',applyFilters);
+  if(devFilter)devFilter.addEventListener('change',applyFilters);
   updateTypeFilter(document.querySelector('.tab-panel.active'));
+  updateScaFilters(document.querySelector('.tab-panel.active'));
   applyFilters();
 })();
 </script>
@@ -907,4 +1007,4 @@ async function run(): Promise<void> {
     }
 }
 
-run();
+if (require.main === module) run();

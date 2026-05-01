@@ -82,6 +82,28 @@ ADO-Cycode-Plugin/
 
 ## Local testing
 
+### HTML report preview — no ADO required
+
+The fastest way to inspect report changes is to generate an HTML report from the sample JSON files in `json_examples/` and open it in a browser.
+
+```bash
+cd cycodescan
+npm install
+npm run test-report
+```
+
+This compiles the task TypeScript, reads all four files in `json_examples/` (`cycode_results_sast.json`, `cycode_results_sca.json`, `cycode_results_secret.json`, `cycode_results_iac.json`), generates a combined report, and writes it to `test-report.html` at the repo root.
+
+Open the result:
+
+```bash
+open ../test-report.html        # macOS
+start ../test-report.html       # Windows
+xdg-open ../test-report.html    # Linux
+```
+
+To add or replace sample data, drop a `cycode_results_<type>.json` file into `json_examples/` and re-run `npm run test-report`. The script picks up every `*.json` file in that directory automatically.
+
 ### Quick smoke test — no ADO required
 
 `azure-pipelines-task-lib` reads task inputs from `INPUT_<NAME>` environment variables. Compile the task and run it directly:
