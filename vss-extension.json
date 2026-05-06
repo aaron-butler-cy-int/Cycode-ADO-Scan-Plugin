@@ -1,11 +1,11 @@
 {
     "manifestVersion": 1,
     "id": "CycodeSecurityScan",
-    "version": "0.2.22",
+    "version": "0.2.24",
     "name": "Cycode Security Scan",
     "description": "Run Cycode security scans (SAST, SCA, Secrets, IaC) and view results as a dedicated build results tab.",
     "publisher": "AaronButler-Cycode",
-    "public": true,
+    "public": false,
     "repository": {
         "type": "git",
         "url": "https://github.com/aaron-butler-cy-int/Cycode-ADO-Scan-Plugin"

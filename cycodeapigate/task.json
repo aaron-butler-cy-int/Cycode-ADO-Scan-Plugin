@@ -18,7 +18,7 @@
     "version": {
         "Major": 0,
         "Minor": 2,
-        "Patch": 22
+        "Patch": 24
     },
     "instanceNameFormat": "Cycode API Gate",
     "minimumAgentVersion": "2.206.1",

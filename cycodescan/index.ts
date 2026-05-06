@@ -209,24 +209,48 @@ function ensureCycodeInstalled(): string {
 // JSON extraction — Cycode exits non-zero when findings exist; stdout = JSON
 // ---------------------------------------------------------------------------
 
+class AuthenticationError extends Error {
+    constructor(detail: string) {
+        super(
+            'Cycode authentication failed — verify that CycodeClientID and CycodeClientSecret ' +
+            'are correct and have not expired.' +
+            (detail ? `\nDetail: ${detail}` : '')
+        );
+        this.name = 'AuthenticationError';
+    }
+}
+
+// Patterns that indicate a credential / auth rejection from the Cycode CLI
+const AUTH_ERROR_RE = /unauthori[sz]ed|authentication[\s_-]?failed|invalid[\s_-]?(client|credentials?|token)|access[\s_-]?denied|forbidden|401|403/i;
+
+function assertNotAuthError(stdout: string, stderr: string): void {
+    const detail = stderr.trim() || stdout.trim();
+    if (AUTH_ERROR_RE.test(detail)) throw new AuthenticationError(detail);
+}
+
 function runScan(cmd: string, env: Record<string, string>): string {
     const mergedEnv = { ...process.env, ...env } as NodeJS.ProcessEnv;
     try {
-        return execSync(cmd, {
+        const output = execSync(cmd, {
             env: mergedEnv,
             encoding: 'utf8',
             shell: SHELL,
             maxBuffer: 100 * 1024 * 1024, // 100 MB
         });
+        // Cycode can exit 0 on auth errors in some versions — check stdout too
+        assertNotAuthError(output, '');
+        return output;
     } catch (ex: any) {
+        if (ex instanceof AuthenticationError) throw ex;
         // Non-zero exit is expected when findings are present
         const stdout: string = ex.stdout
             ? (Buffer.isBuffer(ex.stdout) ? ex.stdout.toString('utf8') : String(ex.stdout))
             : '';
-        if (stdout.trim()) return stdout;
         const stderr: string = ex.stderr
             ? (Buffer.isBuffer(ex.stderr) ? ex.stderr.toString('utf8') : String(ex.stderr))
             : '';
+        assertNotAuthError(stdout, stderr);
+        if (stdout.trim()) return stdout;
         throw new Error(`Cycode scan failed with no JSON output.\n${stderr || ex.message}`);
     }
 }
@@ -515,6 +539,16 @@ function buildTypeRows(type: string, detections: Detection[], scanPath: string, 
                 const desc = (dd.description ?? '').trim();
                 const rem  = (dd.remediation_guidelines ?? dd.custom_remediation_guidelines ?? '').trim();
 
+                // Combine directory path + filename so the cell shows the full relative path
+                const rawSecretPath = (dd.file_path ?? '').replace(/\/?$/, '/') + (dd.file_name ?? '');
+                const secretFilePath = normalizeFilePath(rawSecretPath || (dd.file_path ?? ''), scanPath);
+                const secretFileUrl  = secretFilePath ? buildAdoFileUrl(secretFilePath, line, buildInfo) : null;
+                const secretFileInner = secretFileUrl
+                    ? `<a href="${escapeHtmlAttr(secretFileUrl)}" target="_blank">${sanitizeHtmlInput(secretFilePath)}</a>`
+                    : sanitizeHtmlInput(secretFilePath);
+                const secretFileCell = `<td><div class="file">${secretFileInner}</div>` +
+                    `${line ? `<div class="line">Line ${sanitizeHtmlInput(line)}</div>` : ''}</td>`;
+
                 const descParts: string[] = [];
                 if (msg) {
                     const msgShort = msg.length > 200 ? msg.slice(0, 200) + '…' : msg;
@@ -533,11 +567,11 @@ function buildTypeRows(type: string, detections: Detection[], scanPath: string, 
                 }
                 if (!descParts.length) descParts.push('<span style="color:var(--muted)">—</span>');
 
-                const hs = [sev, secretType, msg, desc, rem, filePath, String(line)].join(' ').toLowerCase();
+                const hs = [sev, secretType, msg, desc, rem, secretFilePath, String(line)].join(' ').toLowerCase();
                 return `<tr data-severity="${sanitizeHtmlInput(sev)}" data-sev-rank="${SEVERITY_ORDER.indexOf(sev)}" data-type="${sanitizeHtmlInput(d.type ?? '')}" data-search="${sanitizeHtmlInput(hs)}">` +
                     sevCell +
                     `<td><strong>${secretType}</strong></td>` +
-                    fileCell +
+                    secretFileCell +
                     `<td>${descParts.join('')}</td>` +
                     `</tr>`;
             }
@@ -1176,6 +1210,7 @@ async function run(): Promise<void> {
                 if (jsonStart === -1) throw new Error('no JSON found in output');
                 rawData = JSON.parse(scanOutput.slice(jsonStart));
             } catch (err: any) {
+                if (err instanceof AuthenticationError) throw err;
                 console.log(`Warning: ${type} scan failed — ${err.message}`);
                 failedTypes.push(type);
                 continue;
