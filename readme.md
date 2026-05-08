@@ -119,6 +119,8 @@ export INPUT_CYCODECLIENTID=your-client-id
 export INPUT_CYCODECLIENTSECRET=your-client-secret
 export INPUT_SCANTYPE=all          # all | sast | sca | secret | iac  (comma-separated for a subset)
 export INPUT_SCANMODE=path         # path | commitHistory
+                                   # commitHistory requires at least 2 commits in local git history;
+                                   # ensure the repo has depth >= 2 (see Pipeline usage below)
 export INPUT_SEVERITYTHRESHOLD=High
 export INPUT_BREAKPIPELINE=false
 export INPUT_VERBOSE=false
@@ -220,6 +222,29 @@ steps:
       severityThreshold: Medium  # Info | Low | Medium | High | Critical
       breakPipeline: true
 ```
+
+### Commit history scan mode
+
+When `scanMode` is set to `commitHistory`, the task scans only the changes introduced since the previous commit — significantly faster on large repositories. This requires at least two commits to be present in the local git clone. Add `fetchDepth: 2` to the checkout step before the scan task:
+
+```yaml
+steps:
+  - checkout: self
+    fetchDepth: 2   # required for commit-history scan mode
+
+  - task: cycodescan@0
+    displayName: 'Cycode Security Scan (commit history)'
+    inputs:
+      CycodeClientID: $(CycodeClientID)
+      CycodeClientSecret: $(CycodeClientSecret)
+      scanPath: $(Build.SourcesDirectory)
+      scanType: all
+      scanMode: commitHistory
+      severityThreshold: Medium
+      breakPipeline: true
+```
+
+> **Note:** If `fetchDepth` is omitted (ADO hosted agents default to 1), the task cannot resolve a previous commit in the local clone and automatically falls back to a full path scan.
 
 ### Cycode API Gate
 

@@ -237,8 +237,14 @@ function runScan(cmd: string, env: Record<string, string>): string {
             shell: SHELL,
             maxBuffer: 100 * 1024 * 1024, // 100 MB
         });
-        // Cycode can exit 0 on auth errors in some versions — check stdout too
-        assertNotAuthError(output, '');
+        // Cycode can exit 0 on auth errors in some versions — check stdout,
+        // but only when the output is not JSON. Scan results are JSON and may
+        // contain auth-related strings inside detected secret values, which
+        // would cause false-positive AuthenticationErrors.
+        const firstChar = output.trimStart()[0];
+        if (firstChar !== '{' && firstChar !== '[') {
+            assertNotAuthError(output, '');
+        }
         return output;
     } catch (ex: any) {
         if (ex instanceof AuthenticationError) throw ex;
@@ -1188,8 +1194,27 @@ async function run(): Promise<void> {
                     '"Allow scripts to access OAuth token" is enabled for the REST API fallback.'
                 );
             }
-            commitRange = `${prevSha}..${currentSha}`;
-            console.log(`Commit range: ${commitRange}`);
+            // Verify the previous SHA is present in the local clone before using it.
+            // Shallow clones (fetchDepth: 1) only contain HEAD, so the ADO REST API
+            // may return a valid SHA that the Cycode CLI cannot resolve locally —
+            // causing cryptic failures mid-scan (e.g. authentication errors from
+            // API fallbacks triggered inside the CLI).
+            const prevShaExists = (() => {
+                try {
+                    execSync(`git cat-file -e ${prevSha}`, { cwd: scanPath, shell: SHELL, stdio: 'pipe' });
+                    return true;
+                } catch { return false; }
+            })();
+            if (!prevShaExists) {
+                console.log(
+                    `Warning: previous SHA ${prevSha.slice(0, 7)} is not present in the local git repository ` +
+                    `(shallow clone). Falling back to path scan for all types. ` +
+                    `To enable commit-history scanning, add \`fetchDepth: 0\` to the checkout step.`
+                );
+            } else {
+                commitRange = `${prevSha}..${currentSha}`;
+                console.log(`Commit range: ${commitRange}`);
+            }
         }
 
         const allDetections: Detection[] = [];
@@ -1204,7 +1229,20 @@ async function run(): Promise<void> {
 
             let rawData: ScanOutput | Detection[];
             try {
-                const scanOutput = runScan(scanCmd, credentials);
+                let scanOutput: string;
+                try {
+                    scanOutput = runScan(scanCmd, credentials);
+                } catch (err: any) {
+                    if (err instanceof AuthenticationError) throw err;
+                    if (commitRange && (/commit.range.*not supported/i.test(err.message) || /sha .* could not be resolved/i.test(err.message))) {
+                        const pathCmd = `${cycodeExe}${verboseFlag} -o json scan --soft-fail -t ${type}${extraStr} path ${quotedPath}`;
+                        console.log(`${type} does not support commit-history scanning — falling back to path scan`);
+                        console.log(`Running: ${pathCmd}`);
+                        scanOutput = runScan(pathCmd, credentials);
+                    } else {
+                        throw err;
+                    }
+                }
                 // Slice from the first { or [ to tolerate stray text before the JSON blob
                 const jsonStart = scanOutput.search(/[{[]/);
                 if (jsonStart === -1) throw new Error('no JSON found in output');

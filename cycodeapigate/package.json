@@ -1,6 +1,6 @@
 {
     "name": "cycodeapigate",
-    "version": "0.2.24",
+    "version": "0.2.28",
     "main": "out/index.js",
     "scripts": {
         "build": "tsc -p tsconfig.json"

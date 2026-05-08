@@ -13,11 +13,12 @@ Runs the Cycode CLI on your repository and publishes an interactive HTML report 
 **Features:**
 - Installs the Cycode CLI automatically if not present (requires Python 3 + pip on the agent)
 - Supports all scan types: **SAST**, **SCA**, **Secrets**, and **IaC** — individually or all at once
+- Two scan modes: **full path scan** (default) or **commit history scan** (changes since the previous commit)
 - Rich, filterable HTML report attached directly to the build
 - Configurable severity threshold for pipeline gating
 - Works on Linux and Windows hosted/self-hosted agents
 
-**Example usage:**
+**Example usage — full path scan:**
 
 ```yaml
 - task: cycodescan@0
@@ -30,6 +31,27 @@ Runs the Cycode CLI on your repository and publishes an interactive HTML report 
     severityThreshold: High
     breakPipeline: true
 ```
+
+**Example usage — commit history scan (faster, incremental):**
+
+```yaml
+steps:
+  - checkout: self
+    fetchDepth: 2   # required — provides the previous commit for diff scanning
+
+  - task: cycodescan@0
+    displayName: 'Cycode Security Scan'
+    inputs:
+      CycodeClientID: $(CycodeClientID)
+      CycodeClientSecret: $(CycodeClientSecret)
+      scanPath: $(Build.SourcesDirectory)
+      scanType: all
+      scanMode: commitHistory
+      severityThreshold: High
+      breakPipeline: true
+```
+
+> `fetchDepth: 2` is required for `commitHistory` mode. Without it, the agent checks out only the latest commit and the task cannot resolve a previous commit to diff against. If the previous commit is unavailable, the task falls back to a full path scan automatically.
 
 ---
 
