@@ -18,7 +18,7 @@
     "version": {
         "Major": 0,
         "Minor": 2,
-        "Patch": 28
+        "Patch": 30
     },
     "instanceNameFormat": "Cycode Security Scan",
     "minimumAgentVersion": "2.206.1",
@@ -107,6 +107,15 @@
             "required": false,
             "groupName": "gating",
             "helpMarkDown": "Fail the pipeline task if one or more findings meet or exceed the severity threshold."
+        },
+        {
+            "name": "artifactFormat",
+            "type": "string",
+            "label": "Artifact Output Format",
+            "defaultValue": "json",
+            "required": false,
+            "groupName": "advanced",
+            "helpMarkDown": "Comma-separated list of artifact formats to upload. Supported values: `json` (one file per scan type), `csv` (single combined file). Example: `json,csv`."
         },
         {
             "name": "additionalFlags",

@@ -271,6 +271,40 @@ export function extractDetections(data: ScanOutput | Detection[]): Detection[] {
     return out;
 }
 
+function toCsv(detections: Detection[], baseUrl: string): string {
+    const headers = [
+        'severity', 'type', 'issue_name', 'description',
+        'file', 'line', 'cwe', 'owasp', 'category', 'languages',
+        'remediation', 'base_url',
+        'detection_rule_id', 'policy_id', 'id',
+    ];
+    const esc = (v: unknown): string => {
+        const s = v == null ? '' : String(v);
+        return /[,"\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const rows = detections.map(d => {
+        const dd = d.detection_details;
+        return [
+            d.severity,
+            d.type,
+            dd?.policy_display_name,
+            dd?.description,
+            dd?.file_path,
+            dd?.line_in_file,
+            dd?.cwe?.join('; '),
+            dd?.owasp?.join('; '),
+            dd?.category,
+            dd?.languages?.join('; '),
+            dd?.remediation_guidelines,
+            baseUrl,
+            d.detection_rule_id,
+            dd?.policy_id,
+            d.id,
+        ].map(esc).join(',');
+    });
+    return [headers.join(','), ...rows].join('\n');
+}
+
 // ---------------------------------------------------------------------------
 // HTML report generation — tabbed layout per scan type
 // ---------------------------------------------------------------------------
@@ -1159,7 +1193,8 @@ async function run(): Promise<void> {
         const statusOut = (() => { try { return execSync(`${cycodeExe} status`, { shell: SHELL, encoding: 'utf8' }).trim(); } catch { return 'unknown'; } })();
         console.log(`Cycode CLI status: ${statusOut}`);
 
-        const scanMode     = tl.getInput('scanMode') || 'path';
+        const scanMode          = tl.getInput('scanMode') || 'path';
+        const artifactFormats   = new Set((tl.getInput('artifactFormat') || 'json').split(',').map(s => s.trim().toLowerCase()).filter(Boolean));
         const scanTypes    = parseScanTypes(tl.getInput('scanType') || 'all');
         const verboseFlag  = verbose ? ' -v' : '';
         const extraStr     = extraFlags ? ` ${extraFlags}` : '';
@@ -1254,14 +1289,22 @@ async function run(): Promise<void> {
                 continue;
             }
 
-            // Upload per-type raw JSON artifact
-            const jsonFile = path.join(tempDir, `cycode_results_${type}.json`);
-            fs.writeFileSync(jsonFile, JSON.stringify(rawData, null, 2));
-            tl.uploadArtifact('Cycode', jsonFile, 'Cycode Scan Results');
+            if (artifactFormats.has('json')) {
+                const jsonFile = path.join(tempDir, `cycode_results_${type}.json`);
+                fs.writeFileSync(jsonFile, JSON.stringify(rawData, null, 2));
+                tl.uploadArtifact('Cycode', jsonFile, 'Cycode Scan Results');
+            }
 
             const typeDetections = extractDetections(rawData).map(d => ({ ...d, _scanType: type }));
             console.log(`${type} scan complete — findings: ${typeDetections.length}`);
             allDetections.push(...typeDetections);
+        }
+
+        if (artifactFormats.has('csv')) {
+            const csvFile = path.join(tempDir, 'cycode_results.csv');
+            const baseUrl = process.env.CYCODE_APP_URL ?? 'https://app.cycode.com';
+            fs.writeFileSync(csvFile, toCsv(allDetections, baseUrl));
+            tl.uploadArtifact('Cycode', csvFile, 'Cycode Scan Results');
         }
 
         if (failedTypes.length) {
